@@ -12,6 +12,7 @@ import (
 	"github.com/git-lfs/git-lfs/v3/git"
 	"github.com/git-lfs/git-lfs/v3/lfs"
 	"github.com/git-lfs/git-lfs/v3/subprocess"
+	"github.com/git-lfs/git-lfs/v3/tools"
 	"github.com/git-lfs/git-lfs/v3/tq"
 	"github.com/git-lfs/git-lfs/v3/tr"
 )
@@ -45,13 +46,18 @@ type abstractCheckout interface {
 	Run(*lfs.WrappedPointer)
 	RunToPath(*lfs.WrappedPointer, string) error
 	Close()
+	SetCopyCallbackFactory(func(*lfs.WrappedPointer) tools.CopyCallback)
+	Errors() []error
 }
 
 type singleCheckout struct {
-	gitIndexer    *gitIndexer
-	pathConverter lfs.PathConverter
-	manifest      tq.Manifest
-	remote        string
+	gitIndexer      *gitIndexer
+	pathConverter   lfs.PathConverter
+	manifest        tq.Manifest
+	remote          string
+	progressFactory func(*lfs.WrappedPointer) tools.CopyCallback
+	errMu           sync.Mutex
+	errs            []error
 }
 
 func (c *singleCheckout) Manifest() tq.Manifest {
@@ -59,6 +65,30 @@ func (c *singleCheckout) Manifest() tq.Manifest {
 		c.manifest = getTransferManifestOperationRemote("download", c.remote)
 	}
 	return c.manifest
+}
+
+func (c *singleCheckout) SetCopyCallbackFactory(factory func(*lfs.WrappedPointer) tools.CopyCallback) {
+	c.progressFactory = factory
+}
+
+func (c *singleCheckout) recordError(err error) {
+	if err == nil {
+		return
+	}
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
+	c.errs = append(c.errs, err)
+}
+
+func (c *singleCheckout) Errors() []error {
+	c.errMu.Lock()
+	defer c.errMu.Unlock()
+	if len(c.errs) == 0 {
+		return nil
+	}
+	copied := make([]error, len(c.errs))
+	copy(copied, c.errs)
+	return copied
 }
 
 func (c *singleCheckout) Skip() bool {
@@ -104,7 +134,9 @@ func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 			// acceptable error, data not local (fetch not run or include/exclude)
 			Error(tr.Tr.Get("Skipped checkout for %q, content not local. Use fetch to download.", p.Name))
 		} else {
-			FullError(errors.Wrap(err, tr.Tr.Get("could not check out %q", p.Name)))
+			wrapped := errors.Wrap(err, tr.Tr.Get("could not check out %q", p.Name))
+			c.recordError(wrapped)
+			FullError(wrapped)
 		}
 		return
 	}
@@ -119,7 +151,12 @@ func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 // not perform any sort of sanity checking or add the path to the index.
 func (c *singleCheckout) RunToPath(p *lfs.WrappedPointer, path string) error {
 	gitfilter := lfs.NewGitFilter(cfg)
-	return gitfilter.SmudgeToFile(path, p.Pointer, false, c.manifest, nil)
+	download := !cfg.StorageCacheEnabled()
+	var copyCb tools.CopyCallback
+	if c.progressFactory != nil {
+		copyCb = c.progressFactory(p)
+	}
+	return gitfilter.SmudgeToFile(path, p.Pointer, download, c.manifest, copyCb)
 }
 
 func (c *singleCheckout) Close() {
@@ -143,6 +180,10 @@ func (c *noOpCheckout) Manifest() tq.Manifest {
 func (c *noOpCheckout) Skip() bool {
 	return true
 }
+
+func (c *noOpCheckout) SetCopyCallbackFactory(func(*lfs.WrappedPointer) tools.CopyCallback) {}
+
+func (c *noOpCheckout) Errors() []error { return nil }
 
 func (c *noOpCheckout) RunToPath(p *lfs.WrappedPointer, path string) error {
 	return nil

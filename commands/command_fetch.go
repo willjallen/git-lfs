@@ -92,6 +92,10 @@ func getIncludeExcludeArgs(cmd *cobra.Command) (include, exclude *string) {
 func fetchCommand(cmd *cobra.Command, args []string) {
 	setupRepository()
 
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("git lfs fetch is unavailable when lfs.storagecache=false; use pull or checkout to stream objects"))
+	}
+
 	var refs []*git.Ref
 
 	if len(args) > 0 {

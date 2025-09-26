@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -78,6 +79,9 @@ type uploadContext struct {
 	// pointers should allow pushing Git blobs
 	allowMissing bool
 
+	cleanupMu   sync.Mutex
+	cleanupOids map[string]struct{}
+
 	// tracks errors from gitscanner callbacks
 	scannerErr error
 	errMu      sync.Mutex
@@ -124,6 +128,61 @@ func (c *uploadContext) NewQueue(options ...tq.Option) *tq.TransferQueue {
 		tq.WithProgress(c.meter),
 		tq.WithBatchSize(cfg.TransferBatchSize()),
 	)...)
+}
+
+func (c *uploadContext) shouldCleanupAfterUpload() bool {
+	return !cfg.StorageCacheEnabled() && cfg.IsKnownGoodRemote(c.Remote) && !c.DryRun
+}
+
+func (c *uploadContext) trackCleanup(oid string) {
+	c.cleanupMu.Lock()
+	defer c.cleanupMu.Unlock()
+	if c.cleanupOids == nil {
+		c.cleanupOids = make(map[string]struct{})
+	}
+	c.cleanupOids[oid] = struct{}{}
+}
+
+func (c *uploadContext) cleanupUploaded() {
+	if !c.shouldCleanupAfterUpload() {
+		return
+	}
+
+	c.cleanupMu.Lock()
+	if len(c.cleanupOids) == 0 {
+		c.cleanupMu.Unlock()
+		return
+	}
+	oids := make([]string, 0, len(c.cleanupOids))
+	for oid := range c.cleanupOids {
+		oids = append(oids, oid)
+	}
+	c.cleanupOids = make(map[string]struct{})
+	c.cleanupMu.Unlock()
+
+	root := cfg.LFSObjectDir()
+	for _, oid := range oids {
+		path := cfg.Filesystem().ObjectPathname(oid)
+		if err := os.Remove(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			FullError(errors.Wrap(err, tr.Tr.Get("unable to remove cached object %s", oid)))
+			continue
+		}
+
+		dir := filepath.Dir(path)
+		for dir != root {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			if err := os.Remove(dir); err != nil {
+				break
+			}
+			dir = parent
+		}
+	}
 }
 
 func (c *uploadContext) scannerError() error {
@@ -239,6 +298,9 @@ func (c *uploadContext) UploadPointers(q *tq.TransferQueue, unfiltered ...*lfs.W
 		}
 
 		q.Add(t.Name, t.Path, t.Oid, t.Size, t.Missing, nil)
+		if c.shouldCleanupAfterUpload() && !t.Missing {
+			c.trackCleanup(t.Oid)
+		}
 		c.SetUploaded(p.Oid)
 	}
 }
@@ -296,6 +358,10 @@ func (c *uploadContext) ReportErrors() {
 
 	if len(c.otherErrs) > 0 {
 		os.Exit(2)
+	}
+
+	if len(c.missing) == 0 && len(c.corrupt) == 0 && len(c.otherErrs) == 0 {
+		c.cleanupUploaded()
 	}
 
 	if c.lockVerifier.HasUnownedLocks() {

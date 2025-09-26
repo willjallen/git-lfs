@@ -10,6 +10,7 @@ import (
 	"github.com/git-lfs/git-lfs/v3/git"
 	"github.com/git-lfs/git-lfs/v3/lfs"
 	"github.com/git-lfs/git-lfs/v3/tasklog"
+	"github.com/git-lfs/git-lfs/v3/tools"
 	"github.com/git-lfs/git-lfs/v3/tq"
 	"github.com/git-lfs/git-lfs/v3/tr"
 	"github.com/rubyist/tracerx"
@@ -38,16 +39,37 @@ func pull(filter *filepathfilter.Filter) {
 		Panic(err, tr.Tr.Get("Could not pull"))
 	}
 
-	pointers := newPointerMap()
 	logger := tasklog.NewLogger(os.Stdout,
 		tasklog.ForceProgress(cfg.ForceProgress()),
 	)
 	meter := tq.NewMeter(cfg)
 	meter.Logger = meter.LoggerFromEnv(cfg.Os)
+	meter.Direction = tq.Download
 	logger.Enqueue(meter)
 	remote := cfg.Remote()
-	singleCheckout := newSingleCheckout(cfg.Git, remote)
-	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
+	checkout := newSingleCheckout(cfg.Git, remote)
+
+	if !cfg.StorageCacheEnabled() {
+		if err := pullStream(filter, ref, checkout, meter); err != nil {
+			checkout.Close()
+			ExitWithError(err)
+		}
+		checkout.Close()
+		if errs := checkout.Errors(); len(errs) > 0 {
+			for _, err := range errs {
+				FullError(err)
+			}
+			Exit(tr.Tr.Get("Failed to fetch some objects; see errors above"))
+		}
+
+		if checkout.Skip() {
+			fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
+		}
+		return
+	}
+
+	pointers := newPointerMap()
+	q := newDownloadQueue(checkout.Manifest(), remote, tq.WithProgress(meter))
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
 			LoggedError(err, tr.Tr.Get("Scanner error: %s", err))
@@ -61,7 +83,7 @@ func pull(filter *filepathfilter.Filter) {
 		// no need to download objects that exist locally already
 		lfs.LinkOrCopyFromReference(cfg, p.Oid, p.Size)
 		if cfg.LFSObjectExists(p.Oid, p.Size) {
-			singleCheckout.Run(p)
+			checkout.Run(p)
 			return
 		}
 
@@ -80,7 +102,7 @@ func pull(filter *filepathfilter.Filter) {
 	go func() {
 		for t := range dlwatch {
 			for _, p := range pointers.All(t.Oid) {
-				singleCheckout.Run(p)
+				checkout.Run(p)
 			}
 		}
 		wg.Done()
@@ -88,7 +110,7 @@ func pull(filter *filepathfilter.Filter) {
 
 	processQueue := time.Now()
 	if err := gitscanner.ScanLFSFiles(ref.Sha, nil); err != nil {
-		singleCheckout.Close()
+		checkout.Close()
 		ExitWithError(err)
 	}
 
@@ -97,7 +119,7 @@ func pull(filter *filepathfilter.Filter) {
 	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
 
-	singleCheckout.Close()
+	checkout.Close()
 
 	success := true
 	for _, err := range q.Errors() {
@@ -111,9 +133,58 @@ func pull(filter *filepathfilter.Filter) {
 		Exit(tr.Tr.Get("Failed to fetch some objects from '%s'", e.Url))
 	}
 
-	if singleCheckout.Skip() {
+	if errs := checkout.Errors(); len(errs) > 0 {
+		success = false
+		for _, err := range errs {
+			FullError(err)
+		}
+	}
+
+	if !success {
+		Exit(tr.Tr.Get("Failed to fetch some objects; see errors above"))
+	}
+
+	if checkout.Skip() {
 		fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
 	}
+}
+
+func pullStream(filter *filepathfilter.Filter, ref *git.Ref, checkout abstractCheckout, meter *tq.Meter) error {
+	checkout.SetCopyCallbackFactory(func(p *lfs.WrappedPointer) tools.CopyCallback {
+		if meter == nil {
+			return nil
+		}
+		return func(totalSize, readSoFar int64, readSinceLast int) error {
+			if readSinceLast > 0 {
+				meter.TransferBytes(tq.Download.String(), p.Name, readSoFar, totalSize, readSinceLast)
+			}
+			return nil
+		}
+	})
+
+	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
+		if err != nil {
+			LoggedError(err, tr.Tr.Get("Scanner error: %s", err))
+			return
+		}
+
+		meter.Add(p.Size)
+		meter.StartTransfer(p.Name)
+		defer meter.FinishTransfer(p.Name)
+
+		checkout.Run(p)
+	})
+
+	gitscanner.Filter = filter
+	meter.Start()
+
+	if err := gitscanner.ScanLFSFiles(ref.Sha, nil); err != nil {
+		meter.Finish()
+		return err
+	}
+
+	meter.Finish()
+	return nil
 }
 
 // tracks LFS objects being downloaded, according to their unique OIDs.

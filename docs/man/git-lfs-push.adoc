@@ -18,6 +18,10 @@ Upload Git LFS files to the configured endpoint for the current Git
 remote. By default, it filters out objects that are already referenced
 by the local clone of the remote.
 
+When used with `lfs.storagecache=false`, successful uploads to remotes
+listed in `lfs.knowngoodremote` cause Git LFS to remove the corresponding
+objects from the local cache after the push completes.
+
 == OPTIONS
 
 `--dry-run`::

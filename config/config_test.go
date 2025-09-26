@@ -198,6 +198,46 @@ func TestFetchIncludeExcludesAreCleaned(t *testing.T) {
 	assert.Equal(t, []string{"/other/path/to/clean"}, cfg.FetchExcludePaths())
 }
 
+func TestStorageCacheEnabledDefault(t *testing.T) {
+	cfg := NewFrom(Values{})
+	assert.True(t, cfg.StorageCacheEnabled())
+}
+
+func TestStorageCacheEnabledConfigured(t *testing.T) {
+	cfg := NewFrom(Values{
+		Git: map[string][]string{
+			"lfs.storagecache": []string{"false"},
+		},
+	})
+	assert.False(t, cfg.StorageCacheEnabled())
+}
+
+func TestKnownGoodRemotesDefault(t *testing.T) {
+	cfg := NewFrom(Values{})
+	assert.Equal(t, []string{"origin"}, cfg.KnownGoodRemotes())
+}
+
+func TestKnownGoodRemotesConfigured(t *testing.T) {
+	cfg := NewFrom(Values{
+		Git: map[string][]string{
+			"lfs.knowngoodremote":  []string{"Origin", "backup"},
+			"lfs.knowngoodremotes": []string{" staging , backup , upstream "},
+		},
+	})
+	assert.Equal(t, []string{"Origin", "backup", "staging", "upstream"}, cfg.KnownGoodRemotes())
+}
+
+func TestIsKnownGoodRemoteCaseInsensitive(t *testing.T) {
+	cfg := NewFrom(Values{
+		Git: map[string][]string{
+			"lfs.knowngoodremote": []string{"Origin"},
+		},
+	})
+	assert.True(t, cfg.IsKnownGoodRemote("origin"))
+	assert.True(t, cfg.IsKnownGoodRemote("ORIGIN"))
+	assert.False(t, cfg.IsKnownGoodRemote("upstream"))
+}
+
 func TestRepositoryPermissions(t *testing.T) {
 	perms := 0666 & ^umask()
 

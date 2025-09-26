@@ -17,6 +17,11 @@ specify.
 
 This does not update the working copy.
 
+NOTE: When the `lfs.storagecache` configuration option is set to `false`,
+`git lfs fetch` refuses to run because the local object cache is disabled.
+Use `git lfs pull` or `git lfs checkout` to stream objects directly into the
+working tree in that mode.
+
 == OPTIONS
 
 `-I <paths>`::

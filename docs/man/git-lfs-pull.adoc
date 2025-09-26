@@ -17,6 +17,11 @@ This is equivalent to running the following 2 commands:
 
 git lfs fetch [options] [] git lfs checkout
 
+When the `lfs.storagecache` option is `false`, `git lfs pull` streams
+objects directly into the working tree without pre-populating
+`.git/lfs/objects`, effectively combining download and checkout in a
+single step.
+
 == OPTIONS
 
 `-I <paths>`::

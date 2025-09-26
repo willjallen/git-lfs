@@ -343,6 +343,72 @@ func (c *Configuration) ForceProgress() bool {
 	return c.Os.Bool("GIT_LFS_FORCE_PROGRESS", false) || c.Git.Bool("lfs.forceprogress", false)
 }
 
+func (c *Configuration) StorageCacheEnabled() bool {
+	return c.Git.Bool("lfs.storagecache", true)
+}
+
+func (c *Configuration) KnownGoodRemotes() []string {
+	vals := c.Git.GetAll("lfs.knowngoodremote")
+	if csv, ok := c.Git.Get("lfs.knowngoodremotes"); ok {
+		vals = append(vals, csv)
+	}
+
+	seen := make(map[string]struct{})
+	remotes := make([]string, 0, len(vals))
+	for _, raw := range vals {
+		for _, piece := range strings.Split(raw, ",") {
+			trimmed := strings.TrimSpace(piece)
+			if len(trimmed) == 0 {
+				continue
+			}
+			key := strings.ToLower(trimmed)
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			remotes = append(remotes, trimmed)
+		}
+	}
+
+	if len(remotes) == 0 {
+		return []string{defaultRemote}
+	}
+
+	return remotes
+}
+
+func (c *Configuration) IsKnownGoodRemote(name string) bool {
+	trimmed := strings.TrimSpace(name)
+	if len(trimmed) == 0 {
+		return false
+	}
+
+	known := c.KnownGoodRemotes()
+	for _, candidate := range known {
+		if strings.EqualFold(trimmed, candidate) {
+			return true
+		}
+	}
+
+	if mapped, ok := git.MapRemoteURL(trimmed, true); ok {
+		for _, candidate := range known {
+			if strings.EqualFold(mapped, candidate) {
+				return true
+			}
+		}
+	}
+
+	if mapped, ok := git.MapRemoteURL(trimmed, false); ok {
+		for _, candidate := range known {
+			if strings.EqualFold(mapped, candidate) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // HookDir returns the location of the hooks owned by this repository. If the
 // core.hooksPath configuration variable is supported, we prefer that and expand
 // paths appropriately.

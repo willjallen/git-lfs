@@ -16,6 +16,10 @@ of the corresponding large file to standard output. If needed, download
 the file's contents from the Git LFS endpoint. The argument, if
 provided, is only used for a progress bar.
 
+When the `lfs.storagecache` configuration option is `false`, the smudge
+filter streams data directly from the remote and does not populate the
+`.git/lfs/objects` directory.
+
 Smudge is typically run by Git's smudge filter, configured by the
 repository's Git attributes.
 
