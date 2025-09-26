@@ -50,6 +50,10 @@ func pull(filter *filepathfilter.Filter) {
 	// will chdir to root of working tree, if one exists
 	singleCheckout := newSingleCheckout(cfg.Git, remote)
 	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
+	// Tracks early temp files created before a transfer completes so we
+	// can discard any that are never registered.
+	tempDownloads := make(map[string]string)
+	var tempMu sync.Mutex
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
 			LoggedError(err, tr.Tr.Get("Scanner error: %s", err))
@@ -70,7 +74,13 @@ func pull(filter *filepathfilter.Filter) {
 		meter.Add(p.Size)
 		tracerx.Printf("fetch %v [%v]", p.Name, p.Oid)
 		pointers.Add(p)
-		q.Add(downloadTransfer(p))
+		name, path, oid, size, missing, derr := downloadTransfer(p)
+		if derr == nil && len(path) > 0 {
+			tempMu.Lock()
+			tempDownloads[oid] = path
+			tempMu.Unlock()
+		}
+		q.Add(name, path, oid, size, missing, derr)
 	})
 
 	gitscanner.Filter = filter
@@ -81,7 +91,18 @@ func pull(filter *filepathfilter.Filter) {
 
 	go func() {
 		for t := range dlwatch {
-			for _, p := range pointers.All(t.Oid) {
+			tempMu.Lock()
+			delete(tempDownloads, t.Oid)
+			tempMu.Unlock()
+			entries := pointers.All(t.Oid)
+			if !cfg.StorageCacheEnabled() {
+				if count := len(entries); count > 0 && len(t.Path) > 0 {
+					// Register final path and consumer count so checkouts
+					// can share the same temp artifact.
+					cfg.Filesystem().RegisterTempObject(t.Oid, t.Path, count)
+				}
+			}
+			for _, p := range entries {
 				singleCheckout.Run(p)
 			}
 		}
@@ -98,6 +119,17 @@ func pull(filter *filepathfilter.Filter) {
 	q.Wait()
 	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
+	tempMu.Lock()
+	remaining := make([]string, 0, len(tempDownloads))
+	for oid := range tempDownloads {
+		remaining = append(remaining, oid)
+	}
+	tempDownloads = make(map[string]string)
+	tempMu.Unlock()
+	// Discard any temp artifacts that were never registered (e.g., failed transfers).
+	for _, oid := range remaining {
+		cfg.Filesystem().DiscardTempObject(oid)
+	}
 
 	singleCheckout.Close()
 

@@ -43,7 +43,7 @@ func (f *GitFilter) SmudgeToFile(filename string, ptr *Pointer, download bool, m
 		return errors.Wrap(err, tr.Tr.Get("could not create working directory file %q", filename))
 	}
 	defer file.Close()
-	if _, err := f.Smudge(file, ptr, filename, download, manifest, cb); err != nil {
+	if _, err := f.Smudge(file, ptr, filename, download, manifest, cb, nil); err != nil {
 		if errors.IsDownloadDeclinedError(err) {
 			// write placeholder data instead
 			file.Seek(0, io.SeekStart)
@@ -56,7 +56,7 @@ func (f *GitFilter) SmudgeToFile(filename string, ptr *Pointer, download bool, m
 	return nil
 }
 
-func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, download bool, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
+func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, download bool, manifest tq.Manifest, cb tools.CopyCallback, override func() (io.ReadCloser, error)) (int64, error) {
 	mediafile, err := f.ObjectPath(ptr.Oid)
 	if err != nil {
 		return 0, err
@@ -75,29 +75,80 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 	}
 
 	var n int64
+	smudgeSource := mediafile
+	downloadedFromRemote := false
+	tempDownloadPath := ""
+	var cleanupTemp func()
 
 	if ptr.Size == 0 {
 		return 0, nil
 	} else if statErr != nil || stat == nil {
 		if download {
-			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
+			downloadTarget := mediafile
+			if !f.cfg.StorageCacheEnabled() {
+				// In streaming mode, download into a per‑smudge temp file and
+				// serve the working tree write from it; remove on success.
+
+				// Mint a unique, repo-permissioned destination path for this smudge
+				// operation. We only need the name and permissions; the placeholder
+				// file is removed immediately so adapters can atomically rename
+				// into a non-existent path.
+				tempFile, tempErr := tools.TempFile(f.cfg.TempDir(), "lfs-smudge-*", f.cfg)
+				if tempErr != nil {
+					return 0, errors.New(tr.Tr.Get("could not create temporary media file: %v", tempErr))
+				}
+				tempDownloadPath = tempFile.Name()
+				if cerr := tempFile.Close(); cerr != nil {
+					os.Remove(tempDownloadPath)
+					return 0, errors.New(tr.Tr.Get("could not close temporary media file: %v", cerr))
+				}
+				_ = os.Remove(tempDownloadPath)
+				downloadTarget = tempDownloadPath
+				smudgeSource = downloadTarget
+				cleanupTemp = func() {
+					if err := os.Remove(tempDownloadPath); err != nil && !os.IsNotExist(err) {
+						tracerx.Printf("git: smudge: unable to remove temp file %s: %v", tempDownloadPath, err)
+					}
+				}
+			} else {
+				smudgeSource = downloadTarget
+			}
+			fallbackSucceeded := false
+			n, err = f.downloadFile(writer, ptr, workingfile, downloadTarget, manifest, cb)
 
 			// In case of a cherry-pick the newly created commit is likely not yet
 			// be found in the history of a remote branch. Thus, the first attempt might fail.
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
-				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
+				n, err = f.downloadFileFallBack(writer, ptr, workingfile, downloadTarget, manifest, cb)
+				if err == nil {
+					fallbackSucceeded = true
+				}
 			}
 
+			if err == nil && (tempDownloadPath != "" || fallbackSucceeded) {
+				downloadedFromRemote = true
+			}
 		} else {
 			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
 		}
 	} else {
-		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb)
+		smudgeSource = mediafile
+		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb, override)
 	}
 
 	if err != nil {
-		return 0, errors.NewSmudgeError(err, ptr.Oid, mediafile)
+		if cleanupTemp != nil {
+			cleanupTemp()
+			cleanupTemp = nil
+		}
+		return 0, errors.NewSmudgeError(err, ptr.Oid, smudgeSource)
+	}
+
+	// Only remove the temp artifact if we downloaded from a remote.
+	if downloadedFromRemote && cleanupTemp != nil {
+		cleanupTemp()
+		cleanupTemp = nil
 	}
 
 	return n, nil
@@ -124,7 +175,7 @@ func (f *GitFilter) downloadFile(writer io.Writer, ptr *Pointer, workingfile, me
 		return 0, errors.Wrap(errors.Join(errs...), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
 	}
 
-	return f.readLocalFile(writer, ptr, mediafile, workingfile, nil)
+	return f.readLocalFile(writer, ptr, mediafile, workingfile, nil, nil)
 }
 
 func (f *GitFilter) downloadFileFallBack(writer io.Writer, ptr *Pointer, workingfile, mediafile string, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
@@ -154,14 +205,22 @@ func (f *GitFilter) downloadFileFallBack(writer io.Writer, ptr *Pointer, working
 			// Set the remote persistent through all the operation as we found a valid one.
 			// This prevents multiple trial and error searches.
 			f.cfg.SetRemote(remote)
-			return f.readLocalFile(writer, ptr, mediafile, workingfile, nil)
+			return f.readLocalFile(writer, ptr, mediafile, workingfile, nil, nil)
 		}
 	}
 	return 0, errors.Wrap(errors.New(tr.Tr.Get("No known remotes")), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
 }
 
-func (f *GitFilter) readLocalFile(writer io.Writer, ptr *Pointer, mediafile string, workingfile string, cb tools.CopyCallback) (int64, error) {
-	reader, err := tools.RobustOpen(mediafile)
+func (f *GitFilter) readLocalFile(writer io.Writer, ptr *Pointer, mediafile string, workingfile string, cb tools.CopyCallback, override func() (io.ReadCloser, error)) (int64, error) {
+	var (
+		reader io.ReadCloser
+		err    error
+	)
+	if override != nil {
+		reader, err = override()
+	} else {
+		reader, err = tools.RobustOpen(mediafile)
+	}
 	if err != nil {
 		return 0, errors.Wrap(err, tr.Tr.Get("error opening media file"))
 	}

@@ -46,6 +46,11 @@ to `HEAD`, and any `.gitattributes` files in the index or current
 working tree will always be ignored. These constraints do not apply
 with prior versions of Git.
 
+When the `lfs.storagecache` option is `false`, `git lfs pull` streams
+objects directly into the working tree without pre-populating
+`.git/lfs/objects`, effectively combining download and checkout in a
+single step.
+
 == OPTIONS
 
 `-I <paths>`::

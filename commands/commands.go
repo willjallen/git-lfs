@@ -142,9 +142,36 @@ func buildFilepathFilterWithPatternType(config *config.Configuration, includeArg
 	return filepathfilter.New(inc, exc, patternType, determineFilepathFilterCache(config))
 }
 
+// downloadTransfer returns the destination path used for downloading an OID.
+// If the cache is enabled, it returns the canonical .git/lfs/objects path.
+// In streaming mode, it creates a per‑transfer temp file and tracks it so
+// downstream consumers can share and clean it up deterministically.
 func downloadTransfer(p *lfs.WrappedPointer) (name, path, oid string, size int64, missing bool, err error) {
-	path, err = cfg.Filesystem().ObjectPath(p.Oid)
-	return p.Name, path, p.Oid, p.Size, false, err
+	if cfg.StorageCacheEnabled() {
+		path, err = cfg.Filesystem().ObjectPath(p.Oid)
+		return p.Name, path, p.Oid, p.Size, false, err
+	}
+
+	prefix := "lfs-download-"
+	oidFragment := p.Oid
+	if len(oidFragment) > 12 {
+		oidFragment = oidFragment[:12]
+	}
+	// Mint a unique, repo-permissioned destination path for this transfer.
+	// We only need the name and permissions; the placeholder file is removed
+	// immediately so adapters can atomically rename into a non-existent path.
+	tmp, err := tools.TempFile(cfg.TempDir(), prefix+oidFragment+"-", cfg)
+	if err != nil {
+		return "", "", "", 0, false, err
+	}
+	path = tmp.Name()
+	if cerr := tmp.Close(); cerr != nil {
+		os.Remove(path)
+		return "", "", "", 0, false, cerr
+	}
+	_ = os.Remove(path)
+	cfg.Filesystem().TrackTempObject(p.Oid, path)
+	return p.Name, path, p.Oid, p.Size, false, nil
 }
 
 // Get user-readable manual install steps for hooks

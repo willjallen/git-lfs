@@ -25,6 +25,10 @@ func migrateExportCommand(cmd *cobra.Command, args []string) {
 	)
 	defer l.Close()
 
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("git lfs migrate export requires the local cache; re-enable it by setting lfs.storagecache=true"))
+	}
+
 	db, err := getObjectDatabase()
 	if err != nil {
 		ExitWithError(err)

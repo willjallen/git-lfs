@@ -315,6 +315,30 @@ func (c *uploadContext) ReportErrors() {
 			Print("* %s", owned.Path())
 		}
 	}
+
+	// Prune only in streaming mode and only after a successful, non-dry-run
+	// push with explicit known-good remotes configured.
+	if cfg.StorageCacheEnabled() || c.DryRun || len(c.otherErrs) > 0 || len(c.missing) > 0 || len(c.corrupt) > 0 || !cfg.HasExplicitKnownGoodRemotes() {
+		return
+	}
+
+	knownGood := cfg.KnownGoodRemotes()
+	if len(knownGood) != 1 || !cfg.IsKnownGoodRemote(c.Remote) {
+		return
+	}
+
+	for oid := range c.uploadedOids.Iter() {
+		localMediaPath, err := c.gitfilter.ObjectPath(oid)
+		if err != nil {
+			tracerx.Printf("commands: prune: unable to resolve cache path for %s: %v", oid, err)
+			continue
+		}
+
+		// Best-effort removal; log and continue on failure.
+		if err := os.Remove(localMediaPath); err != nil && !os.IsNotExist(err) {
+			tracerx.Printf("commands: prune: unable to remove cached object %s: %v", localMediaPath, err)
+		}
+	}
 }
 
 var (

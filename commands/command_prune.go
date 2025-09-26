@@ -42,6 +42,10 @@ func pruneCommand(cmd *cobra.Command, args []string) {
 		Exit(tr.Tr.Get("Cannot specify both --verify-remote and --no-verify-remote"))
 	}
 
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("git lfs prune requires the local cache; re-enable it by setting lfs.storagecache=true"))
+	}
+
 	fetchPruneConfig := lfs.NewFetchPruneConfig(cfg.Git)
 	verify := !pruneDoNotVerifyArg &&
 		(fetchPruneConfig.PruneVerifyRemoteAlways || pruneVerifyArg)

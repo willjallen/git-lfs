@@ -123,6 +123,22 @@ Note: you should not run `git lfs prune` if you have different
 repositories sharing the same storage directory.
 +
 Default: `lfs` in Git repository directory (usually `.git/lfs`).
+* `lfs.storagecache`
++
+Controls whether Git LFS maintains a local cache under `.git/lfs/objects`
+for the working tree. The default is `true`. When set to `false`, Git LFS
+streams objects directly into the working tree during checkouts and
+smudge operations instead of persisting them on disk. Commands that rely
+on the cache, such as `git lfs fetch`, refuse to run when this option is
+disabled. Disabling the cache saves local storage at the cost of offline
+access.
+* `lfs.knowngoodremote`
++
+Specifies remote names that are considered authoritative when
+`lfs.storagecache` is `false`. After a successful upload to one of these
+remotes, Git LFS removes the corresponding object from the local cache.
+This option can be specified multiple times or as a comma-separated
+list; the default is `origin`.
 * `lfs.largefilewarning`
 +
 Warn when a file is 4 GiB or larger. Such files will be corrupted when

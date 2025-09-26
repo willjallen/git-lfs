@@ -48,6 +48,9 @@ func dedupCommand(cmd *cobra.Command, args []string) {
 	}
 
 	setupRepository()
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("Deduplication is not possible while the Git LFS cache is disabled."))
+	}
 	if gitDir, err := git.GitDir(); err != nil {
 		ExitWithError(err)
 	} else if supported, err := tools.CheckCloneFileSupported(gitDir); err != nil || !supported {

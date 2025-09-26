@@ -61,6 +61,8 @@ func Environ(cfg *config.Configuration, manifest tq.Manifest, envOverrides map[s
 		fmt.Sprintf("PruneVerifyUnreachableAlways=%v", fetchPruneConfig.PruneVerifyUnreachableAlways),
 		fmt.Sprintf("PruneRemoteName=%s", fetchPruneConfig.PruneRemoteName),
 		fmt.Sprintf("LfsStorageDir=%s", cfg.LFSStorageDir()),
+		fmt.Sprintf("StorageCacheEnabled=%v", cfg.StorageCacheEnabled()),
+		fmt.Sprintf("KnownGoodRemotes=%s", strings.Join(cfg.KnownGoodRemotes(), ", ")),
 		fmt.Sprintf("AccessDownload=%s", download.Mode()),
 		fmt.Sprintf("AccessUpload=%s", upload.Mode()),
 		fmt.Sprintf("DownloadTransfers=%s", strings.Join(dltransfers, ",")),

@@ -38,14 +38,21 @@ type Object struct {
 }
 
 type Filesystem struct {
-	GitStorageDir string   // parent of objects/lfs (may be same as GitDir but may not)
-	LFSStorageDir string   // parent of lfs objects and tmp dirs. Default: ".git/lfs"
-	ReferenceDirs []string // alternative local media dirs (relative to clone reference repo)
-	lfsobjdir     string
-	tmpdir        string
-	logdir        string
-	repoPerms     os.FileMode
-	mu            sync.Mutex
+	GitStorageDir      string   // parent of objects/lfs (may be same as GitDir but may not)
+	LFSStorageDir      string   // parent of lfs objects and tmp dirs. Default: ".git/lfs"
+	ReferenceDirs      []string // alternative local media dirs (relative to clone reference repo)
+	lfsobjdir          string
+	tmpdir             string
+	logdir             string
+	repoPerms          os.FileMode
+	mu                 sync.Mutex
+	tempObjects        map[string]*tempObject
+	pendingTempObjects map[string]string
+}
+
+type tempObject struct {
+	path      string
+	remaining int
 }
 
 func (f *Filesystem) EachObject(fn func(Object) error) error {
@@ -79,6 +86,12 @@ func (f *Filesystem) ObjectPath(oid string) (string, error) {
 	if oid == EmptyObjectSHA256 {
 		return os.DevNull, nil
 	}
+
+	// If a streaming temp artifact is active for this OID, prefer it.
+	if path, ok := f.TempObjectPath(oid); ok {
+		return path, nil
+	}
+
 	dir := f.localObjectDir(oid)
 	if err := tools.MkdirAll(dir, f); err != nil {
 		return "", errors.New(tr.Tr.Get("error trying to create local storage directory in %q: %s", dir, err))
@@ -91,6 +104,105 @@ func (f *Filesystem) ObjectPathname(oid string) string {
 		return os.DevNull
 	}
 	return filepath.Join(f.localObjectDir(oid), oid)
+}
+
+func (f *Filesystem) TempObjectPath(oid string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tempObjects == nil {
+		return "", false
+	}
+	obj, ok := f.tempObjects[oid]
+	if !ok {
+		return "", false
+	}
+	return obj.path, true
+}
+
+// RegisterTempObject associates a temp path for an OID with the number of
+// expected consumers. When the refcount reaches zero, the underlying file
+// can be removed.
+func (f *Filesystem) RegisterTempObject(oid, path string, count int) {
+	if count <= 0 || len(path) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingTempObjects != nil {
+		delete(f.pendingTempObjects, oid)
+	}
+
+	if f.tempObjects == nil {
+		f.tempObjects = make(map[string]*tempObject)
+	}
+	if existing, ok := f.tempObjects[oid]; ok {
+		// Another consumer is sharing the same temp artifact; bump its refcount.
+		existing.remaining += count
+		return
+	}
+	f.tempObjects[oid] = &tempObject{path: path, remaining: count}
+}
+
+// ReleaseTempObject decrements the refcount for an OID and returns the
+// path and whether the caller should delete the file.
+func (f *Filesystem) ReleaseTempObject(oid string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tempObjects == nil {
+		return "", false
+	}
+	obj, ok := f.tempObjects[oid]
+	if !ok {
+		return "", false
+	}
+	if obj.remaining > 0 {
+		obj.remaining--
+	}
+	path := obj.path
+	if obj.remaining <= 0 {
+		delete(f.tempObjects, oid)
+		return path, true
+	}
+	return path, false
+}
+
+// TrackTempObject records an early, unregistered temp path so we can clean
+// it up if a transfer fails before registration.
+func (f *Filesystem) TrackTempObject(oid, path string) {
+	if len(oid) == 0 || len(path) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingTempObjects == nil {
+		f.pendingTempObjects = make(map[string]string)
+	}
+	f.pendingTempObjects[oid] = path
+}
+
+// DiscardTempObject removes a pending, unregistered temp path for an OID.
+// Best‑effort: ignore missing files.
+func (f *Filesystem) DiscardTempObject(oid string) {
+	if len(oid) == 0 {
+		return
+	}
+	var path string
+	f.mu.Lock()
+	if f.pendingTempObjects != nil {
+		if p, ok := f.pendingTempObjects[oid]; ok {
+			path = p
+			delete(f.pendingTempObjects, oid)
+		}
+	}
+	f.mu.Unlock()
+	if len(path) == 0 {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		tracerx.Printf("fs: unable to remove temp object %s: %v", path, err)
+	}
 }
 
 func (f *Filesystem) DecodePathname(path string) string {
