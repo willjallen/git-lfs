@@ -3,15 +3,11 @@ package lfs
 import (
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/git-lfs/git-lfs/v3/config"
 	"github.com/git-lfs/git-lfs/v3/errors"
-	"github.com/git-lfs/git-lfs/v3/lfsapi"
-	"github.com/git-lfs/git-lfs/v3/lfshttp"
 	"github.com/git-lfs/git-lfs/v3/tools"
 	"github.com/git-lfs/git-lfs/v3/tools/humanize"
 	"github.com/git-lfs/git-lfs/v3/tq"
@@ -88,6 +84,7 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 		err error
 	)
 
+	var tempCleanup func()
 	if statErr != nil || stat == nil {
 		if !download {
 			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
@@ -104,10 +101,23 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
 			}
 		} else {
-			n, err = f.streamFile(writer, ptr, workingfile, manifest, cb)
+			tempFile, err := tools.TempFile(f.cfg.TempDir(), fmt.Sprintf("%s-", ptr.Oid), f.cfg)
+			if err != nil {
+				return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
+			}
+			tempPath := tempFile.Name()
+			if err := tempFile.Close(); err != nil {
+				os.Remove(tempPath)
+				return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
+			}
+			tempCleanup = func() {
+				os.Remove(tempPath)
+			}
+			mediafile = tempPath
+			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
-				n, err = f.streamFileFallBack(writer, ptr, workingfile, manifest, cb)
+				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
 			}
 		}
 	} else {
@@ -116,6 +126,10 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 
 	if err != nil {
 		return 0, errors.NewSmudgeError(err, ptr.Oid, mediafile)
+	}
+
+	if tempCleanup != nil {
+		tempCleanup()
 	}
 
 	return n, nil
@@ -176,184 +190,6 @@ func (f *GitFilter) downloadFileFallBack(writer io.Writer, ptr *Pointer, working
 		}
 	}
 	return 0, errors.Wrap(errors.New(tr.Tr.Get("No known remotes")), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-}
-
-func (f *GitFilter) streamFile(writer io.Writer, ptr *Pointer, workingfile string, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
-	return f.streamFileFromRemote(writer, ptr, workingfile, manifest, f.cfg.Remote(), cb)
-}
-
-func (f *GitFilter) streamFileFallBack(writer io.Writer, ptr *Pointer, workingfile string, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
-	remotes := f.cfg.Remotes()
-	var lastErr error
-	for index, remote := range remotes {
-		n, err := f.streamFileFromRemote(writer, ptr, workingfile, manifest, remote, cb)
-		if err != nil {
-			lastErr = err
-			if index >= len(remotes)-1 {
-				break
-			}
-			tracerx.Printf("git: download: remote failed %s %s", remote, err)
-			continue
-		}
-		f.cfg.SetRemote(remote)
-		return n, nil
-	}
-
-	if lastErr != nil {
-		return 0, lastErr
-	}
-
-	return 0, errors.Wrap(errors.New(tr.Tr.Get("No known remotes")), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-}
-
-func (f *GitFilter) streamFileFromRemote(writer io.Writer, ptr *Pointer, workingfile string, manifest tq.Manifest, remote string, cb tools.CopyCallback) (int64, error) {
-	if manifest == nil {
-		return 0, errors.New(tr.Tr.Get("cannot download without transfer manifest"))
-	}
-
-	api := manifest.APIClient()
-	if api == nil {
-		return 0, errors.New(tr.Tr.Get("unable to initialize API client"))
-	}
-
-	fmt.Fprintln(os.Stderr, tr.Tr.Get("Downloading %s (%s)", workingfile, humanize.FormatBytes(uint64(ptr.Size))))
-
-	batch, err := tq.Batch(manifest, tq.Download, remote, f.RemoteRef(), []*tq.Transfer{
-		{Oid: ptr.Oid, Size: ptr.Size, Name: filepath.Base(workingfile)},
-	})
-	if err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-	if len(batch.Objects) == 0 {
-		return 0, errors.Wrap(errors.New(tr.Tr.Get("Object %s not found on the server.", ptr.Oid)), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	obj := batch.Objects[0]
-	if obj.Error != nil {
-		return 0, errors.Wrap(obj.Error, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	action, err := obj.Rel("download")
-	if err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-	if action == nil {
-		return 0, errors.Wrap(errors.New(tr.Tr.Get("Object %s not found on the server.", ptr.Oid)), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	req, err := f.newDownloadRequest(api, action)
-	if err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-	req = api.LogRequest(req, "lfs.data.download")
-
-	res, err := f.performStreamRequest(api, obj, remote, ptr.Oid, req)
-	if err != nil {
-		if res != nil {
-			res.Body.Close()
-		}
-		return 0, err
-	}
-	defer res.Body.Close()
-
-	tempFile, err := os.CreateTemp(f.cfg.TempDir(), fmt.Sprintf("%s-", ptr.Oid))
-	if err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-	tempPath := tempFile.Name()
-	defer func() {
-		tempFile.Close()
-		os.Remove(tempPath)
-	}()
-
-	_ = os.Chmod(tempPath, f.cfg.RepositoryPermissions(false))
-
-	reader := tools.NewHashingReader(tools.NewRetriableReader(res.Body))
-	if _, err := tools.CopyWithCallback(tempFile, reader, ptr.Size, cb); err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	if err := tempFile.Close(); err != nil {
-		return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	if oid := reader.Hash(); oid != ptr.Oid {
-		return 0, errors.Wrap(errors.New(tr.Tr.Get("expected OID %s, got %s", ptr.Oid, oid)), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	n, err := f.readLocalFile(writer, ptr, tempPath, workingfile, nil)
-	if err != nil {
-		return n, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-	}
-
-	return n, nil
-}
-
-func (f *GitFilter) newDownloadRequest(api *lfsapi.Client, action *tq.Action) (*http.Request, error) {
-	href := action.Href
-	if api != nil && api.GitEnv().Bool("lfs.transfer.enablehrefrewrite", true) {
-		href = api.Endpoints.NewEndpoint(tq.Download.String(), action.Href).Url
-	}
-
-	if !strings.HasPrefix(strings.ToLower(href), "http://") && !strings.HasPrefix(strings.ToLower(href), "https://") {
-		urlfragment := strings.SplitN(href, "?", 2)[0]
-		return nil, errors.New(tr.Tr.Get("missing protocol: %q", urlfragment))
-	}
-
-	req, err := http.NewRequest("GET", href, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	for key, value := range action.Header {
-		req.Header.Set(key, value)
-	}
-
-	return req, nil
-}
-
-func (f *GitFilter) performStreamRequest(api *lfsapi.Client, obj *tq.Transfer, remote, oid string, req *http.Request) (*http.Response, error) {
-	var (
-		res *http.Response
-		err error
-	)
-
-	if obj.Authenticated {
-		res, err = api.Do(req)
-	} else {
-		endpoint := endpointURLForRequest(req.URL.String(), oid)
-		res, err = api.DoWithAuthNoRetry(remote, api.Endpoints.AccessFor(endpoint), req)
-	}
-
-	if err != nil {
-		if res == nil {
-			return nil, errors.NewRetriableError(err)
-		}
-		if later := errors.NewRetriableLaterError(err, res.Header.Get("Retry-After")); later != nil {
-			return res, later
-		}
-		return res, err
-	}
-
-	if res.StatusCode == http.StatusTooManyRequests {
-		if later := errors.NewRetriableLaterError(lfshttp.NewStatusCodeError(res), res.Header.Get("Retry-After")); later != nil {
-			return res, later
-		}
-	}
-
-	if res.StatusCode < 200 || res.StatusCode > 299 {
-		return res, lfshttp.NewStatusCodeError(res)
-	}
-
-	return res, nil
-}
-
-func endpointURLForRequest(rawurl, oid string) string {
-	parts := strings.Split(rawurl, oid)
-	if len(parts) == 0 {
-		return rawurl
-	}
-	return parts[0]
 }
 
 func (f *GitFilter) readLocalFile(writer io.Writer, ptr *Pointer, mediafile string, workingfile string, cb tools.CopyCallback) (int64, error) {
