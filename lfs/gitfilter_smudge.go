@@ -59,8 +59,10 @@ func (f *GitFilter) SmudgeToFile(filename string, ptr *Pointer, download bool, m
 }
 
 func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, download bool, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
-	cacheEnabled := f.cfg.StorageCacheEnabled()
-	mediafile := f.cfg.Filesystem().ObjectPathname(ptr.Oid)
+	mediafile, err := f.ObjectPath(ptr.Oid)
+	if err != nil {
+		return 0, err
+	}
 
 	LinkOrCopyFromReference(f.cfg, ptr.Oid, ptr.Size)
 
@@ -71,60 +73,26 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 			tracerx.Printf("Removing %s, size %d is invalid", mediafile, fileSize)
 			os.RemoveAll(mediafile)
 			stat = nil
-			statErr = os.ErrNotExist
 		}
 	}
+
+	var n int64
 
 	if ptr.Size == 0 {
 		return 0, nil
-	}
-
-	var (
-		n       int64
-		err     error
-		cleanup func()
-	)
-	defer func() {
-		if cleanup != nil {
-			cleanup()
-		}
-	}()
-	if statErr != nil || stat == nil {
-		if !download {
-			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
-		}
-
-		if cacheEnabled {
-			mediafile, err = f.ObjectPath(ptr.Oid)
-			if err != nil {
-				return 0, err
-			}
+	} else if statErr != nil || stat == nil {
+		if download {
 			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
+
 			// In case of a cherry-pick the newly created commit is likely not yet
 			// be found in the history of a remote branch. Thus, the first attempt might fail.
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
 				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
 			}
+
 		} else {
-			tempFile, err := tools.TempFile(f.cfg.TempDir(), fmt.Sprintf("%s-", ptr.Oid), f.cfg)
-			if err != nil {
-				return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-			}
-			tempPath := tempFile.Name()
-			if err := tempFile.Close(); err != nil {
-				os.Remove(tempPath)
-				return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
-			}
-			cleanup = func() {
-				os.Remove(tempPath)
-			}
-			mediafile = tempPath
-			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
-			if err != nil && f.cfg.SearchAllRemotesEnabled() {
-				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
-				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
-			}
+			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
 		}
 	} else {
 		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb)

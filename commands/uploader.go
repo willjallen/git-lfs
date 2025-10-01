@@ -4,7 +4,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -120,56 +119,11 @@ func newUploadContext(dryRun bool) *uploadContext {
 }
 
 func (c *uploadContext) NewQueue(options ...tq.Option) *tq.TransferQueue {
-	q := tq.NewTransferQueue(tq.Upload, c.Manifest, c.Remote, append(options,
+	return tq.NewTransferQueue(tq.Upload, c.Manifest, c.Remote, append(options,
 		tq.DryRun(c.DryRun),
 		tq.WithProgress(c.meter),
 		tq.WithBatchSize(cfg.TransferBatchSize()),
 	)...)
-
-	if c.shouldCleanupAfterUpload() {
-		watcher := q.Watch()
-		root := cfg.LFSObjectDir()
-		go func() {
-			for t := range watcher {
-				if t == nil || t.Missing {
-					continue
-				}
-				c.cleanupUploadedPath(t.Path, t.Oid, root)
-			}
-		}()
-	}
-
-	return q
-}
-
-func (c *uploadContext) shouldCleanupAfterUpload() bool {
-	return !cfg.StorageCacheEnabled() && cfg.IsKnownGoodRemote(c.Remote) && !c.DryRun
-}
-
-func (c *uploadContext) cleanupUploadedPath(path, oid, root string) {
-	if path == "" || path == os.DevNull {
-		return
-	}
-
-	if err := os.Remove(path); err != nil {
-		if os.IsNotExist(err) {
-			return
-		}
-		FullError(errors.Wrap(err, tr.Tr.Get("unable to remove cached object %s", oid)))
-		return
-	}
-
-	dir := filepath.Dir(path)
-	for dir != root {
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		if err := os.Remove(dir); err != nil {
-			break
-		}
-		dir = parent
-	}
 }
 
 func (c *uploadContext) scannerError() error {

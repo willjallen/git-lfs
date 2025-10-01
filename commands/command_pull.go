@@ -47,7 +47,6 @@ func pull(filter *filepathfilter.Filter) {
 	logger.Enqueue(meter)
 	remote := cfg.Remote()
 	singleCheckout := newSingleCheckout(cfg.Git, remote)
-	cacheEnabled := cfg.StorageCacheEnabled()
 	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
@@ -83,9 +82,6 @@ func pull(filter *filepathfilter.Filter) {
 			for _, p := range pointers.All(t.Oid) {
 				singleCheckout.Run(p)
 			}
-			if !cacheEnabled {
-				cleanupDownloadPath(t.Path)
-			}
 		}
 		wg.Done()
 	}()
@@ -118,13 +114,6 @@ func pull(filter *filepathfilter.Filter) {
 	if singleCheckout.Skip() {
 		fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
 	}
-}
-
-func cleanupDownloadPath(path string) {
-	if path == "" || path == os.DevNull {
-		return
-	}
-	_ = os.Remove(path)
 }
 
 // tracks LFS objects being downloaded, according to their unique OIDs.

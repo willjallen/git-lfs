@@ -60,10 +60,6 @@ func filterCommand(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	if !cfg.StorageCacheEnabled() {
-		supportsDelay = false
-	}
-
 	skip := filterSmudgeSkip || cfg.Os.Bool("GIT_LFS_SKIP_SMUDGE", false)
 	filter := filepathfilter.New(cfg.FetchIncludePaths(), cfg.FetchExcludePaths(), filepathfilter.GitIgnore)
 
@@ -118,7 +114,7 @@ func filterCommand(cmd *cobra.Command, args []string) {
 			}
 
 			w = pktline.NewPktlineWriter(os.Stdout, smudgeFilterBufferCapacity)
-			if supportsDelay && req.Header["can-delay"] == "1" {
+			if req.Header["can-delay"] == "1" {
 				var ptr *lfs.Pointer
 
 				n, delayed, ptr, err = delayedSmudge(gitfilter, s, w, req.Payload, q, req.Header["pathname"], skip, filter)
@@ -139,11 +135,6 @@ func filterCommand(cmd *cobra.Command, args []string) {
 				}
 			}
 		case "list_available_blobs":
-			if q == nil || available == nil || closeOnce == nil {
-				err = s.WriteList(nil)
-				break
-			}
-
 			closeOnce.Do(func() {
 				// The first time that Git sends us the
 				// 'list_available_blobs' command, it is given
