@@ -100,6 +100,8 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 				return 0, err
 			}
 			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
+			// In case of a cherry-pick the newly created commit is likely not yet
+			// be found in the history of a remote branch. Thus, the first attempt might fail.
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
 				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
