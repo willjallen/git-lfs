@@ -119,8 +119,7 @@ func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 // not perform any sort of sanity checking or add the path to the index.
 func (c *singleCheckout) RunToPath(p *lfs.WrappedPointer, path string) error {
 	gitfilter := lfs.NewGitFilter(cfg)
-	download := !cfg.StorageCacheEnabled()
-	return gitfilter.SmudgeToFile(path, p.Pointer, download, c.manifest, nil)
+	return gitfilter.SmudgeToFile(path, p.Pointer, false, c.manifest, nil)
 }
 
 func (c *singleCheckout) Close() {

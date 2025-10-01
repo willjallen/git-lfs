@@ -80,11 +80,15 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 	}
 
 	var (
-		n   int64
-		err error
+		n       int64
+		err     error
+		cleanup func()
 	)
-
-	var tempCleanup func()
+	defer func() {
+		if cleanup != nil {
+			cleanup()
+		}
+	}()
 	if statErr != nil || stat == nil {
 		if !download {
 			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
@@ -110,7 +114,7 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 				os.Remove(tempPath)
 				return 0, errors.Wrap(err, tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
 			}
-			tempCleanup = func() {
+			cleanup = func() {
 				os.Remove(tempPath)
 			}
 			mediafile = tempPath
@@ -126,10 +130,6 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 
 	if err != nil {
 		return 0, errors.NewSmudgeError(err, ptr.Oid, mediafile)
-	}
-
-	if tempCleanup != nil {
-		tempCleanup()
 	}
 
 	return n, nil

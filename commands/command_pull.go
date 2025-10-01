@@ -50,24 +50,21 @@ func pull(filter *filepathfilter.Filter) {
 	cacheEnabled := cfg.StorageCacheEnabled()
 
 	pointers := newPointerMap()
-	var (
-		q       *tq.TransferQueue
-		dlwatch chan *tq.Transfer
-		wg      sync.WaitGroup
-	)
-	if cacheEnabled {
-		q = newDownloadQueue(checkout.Manifest(), remote, tq.WithProgress(meter))
-		dlwatch = q.Watch()
-		wg.Add(1)
-		go func() {
-			for t := range dlwatch {
-				for _, p := range pointers.All(t.Oid) {
-					checkout.Run(p)
-				}
+	q := newDownloadQueue(checkout.Manifest(), remote, tq.WithProgress(meter))
+	dlwatch := q.Watch()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for t := range dlwatch {
+			for _, p := range pointers.All(t.Oid) {
+				checkout.Run(p)
 			}
-			wg.Done()
-		}()
-	}
+			if !cacheEnabled {
+				cleanupDownloadPath(t.Path)
+			}
+		}
+		wg.Done()
+	}()
 
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
@@ -75,7 +72,7 @@ func pull(filter *filepathfilter.Filter) {
 			return
 		}
 
-		if cacheEnabled && pointers.Seen(p) {
+		if pointers.Seen(p) {
 			return
 		}
 
@@ -88,16 +85,8 @@ func pull(filter *filepathfilter.Filter) {
 
 		meter.Add(p.Size)
 		tracerx.Printf("fetch %v [%v]", p.Name, p.Oid)
-		if cacheEnabled {
-			pointers.Add(p)
-			q.Add(downloadTransfer(p))
-			return
-		}
-
-		meter.StartTransfer(p.Name)
-		checkout.Run(p)
-		meter.TransferBytes(tq.Download.String(), p.Name, p.Size, p.Size, int(p.Size))
-		meter.FinishTransfer(p.Name)
+		pointers.Add(p)
+		q.Add(downloadTransfer(p))
 	})
 
 	gitscanner.Filter = filter
@@ -109,21 +98,17 @@ func pull(filter *filepathfilter.Filter) {
 		ExitWithError(err)
 	}
 
-	if cacheEnabled {
-		q.Wait()
-		wg.Wait()
-	}
+	q.Wait()
+	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
 
 	meter.Finish()
 	checkout.Close()
 
 	success := true
-	if cacheEnabled {
-		for _, err := range q.Errors() {
-			success = false
-			FullError(err)
-		}
+	for _, err := range q.Errors() {
+		success = false
+		FullError(err)
 	}
 
 	if !success {
@@ -135,6 +120,13 @@ func pull(filter *filepathfilter.Filter) {
 	if checkout.Skip() {
 		fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
 	}
+}
+
+func cleanupDownloadPath(path string) {
+	if path == "" || path == os.DevNull {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // tracks LFS objects being downloaded, according to their unique OIDs.
