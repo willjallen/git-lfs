@@ -48,9 +48,7 @@ func pull(filter *filepathfilter.Filter) {
 	remote := cfg.Remote()
 	singleCheckout := newSingleCheckout(cfg.Git, remote)
 	cacheEnabled := cfg.StorageCacheEnabled()
-
 	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
-
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
 			LoggedError(err, tr.Tr.Get("Scanner error: %s", err))
@@ -79,6 +77,7 @@ func pull(filter *filepathfilter.Filter) {
 	dlwatch := q.Watch()
 	var wg sync.WaitGroup
 	wg.Add(1)
+
 	go func() {
 		for t := range dlwatch {
 			for _, p := range pointers.All(t.Oid) {
@@ -102,7 +101,6 @@ func pull(filter *filepathfilter.Filter) {
 	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
 
-	meter.Finish()
 	singleCheckout.Close()
 
 	success := true
@@ -118,7 +116,7 @@ func pull(filter *filepathfilter.Filter) {
 	}
 
 	if singleCheckout.Skip() {
-		fmt.Println(tr.Tr.Get("Skipping object singleCheckout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
+		fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
 	}
 }
 
