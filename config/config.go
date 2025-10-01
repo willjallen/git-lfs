@@ -377,6 +377,22 @@ func (c *Configuration) KnownGoodRemotes() []string {
 	return remotes
 }
 
+func (c *Configuration) HasExplicitKnownGoodRemotes() bool {
+	for _, raw := range c.Git.GetAll("lfs.knowngoodremote") {
+		if strings.TrimSpace(raw) != "" {
+			return true
+		}
+	}
+
+	if csv, ok := c.Git.Get("lfs.knowngoodremotes"); ok {
+		if strings.TrimSpace(csv) != "" {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *Configuration) IsKnownGoodRemote(name string) bool {
 	trimmed := strings.TrimSpace(name)
 	if len(trimmed) == 0 {

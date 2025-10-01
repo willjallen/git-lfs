@@ -227,6 +227,20 @@ func TestKnownGoodRemotesConfigured(t *testing.T) {
 	assert.Equal(t, []string{"Origin", "backup", "staging", "upstream"}, cfg.KnownGoodRemotes())
 }
 
+func TestHasExplicitKnownGoodRemotesDefault(t *testing.T) {
+	cfg := NewFrom(Values{})
+	assert.False(t, cfg.HasExplicitKnownGoodRemotes())
+}
+
+func TestHasExplicitKnownGoodRemotesConfigured(t *testing.T) {
+	cfg := NewFrom(Values{
+		Git: map[string][]string{
+			"lfs.knowngoodremotes": []string{" origin "},
+		},
+	})
+	assert.True(t, cfg.HasExplicitKnownGoodRemotes())
+}
+
 func TestIsKnownGoodRemoteCaseInsensitive(t *testing.T) {
 	cfg := NewFrom(Values{
 		Git: map[string][]string{
