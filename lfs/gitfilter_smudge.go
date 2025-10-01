@@ -107,6 +107,7 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 			} else {
 				smudgeSource = downloadTarget
 			}
+			fallbackSucceeded := false
 			n, err = f.downloadFile(writer, ptr, workingfile, downloadTarget, manifest, cb)
 
 			// In case of a cherry-pick the newly created commit is likely not yet
@@ -114,9 +115,12 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
 				n, err = f.downloadFileFallBack(writer, ptr, workingfile, downloadTarget, manifest, cb)
+				if err == nil {
+					fallbackSucceeded = true
+				}
 			}
 
-			if err == nil && tempDownloadPath != "" {
+			if err == nil && (tempDownloadPath != "" || fallbackSucceeded) {
 				downloadedFromRemote = true
 			}
 		} else {
