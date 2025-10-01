@@ -38,33 +38,18 @@ func pull(filter *filepathfilter.Filter) {
 		Panic(err, tr.Tr.Get("Could not pull"))
 	}
 
+	pointers := newPointerMap()
 	logger := tasklog.NewLogger(os.Stdout,
 		tasklog.ForceProgress(cfg.ForceProgress()),
 	)
 	meter := tq.NewMeter(cfg)
 	meter.Logger = meter.LoggerFromEnv(cfg.Os)
-	meter.Direction = tq.Download
 	logger.Enqueue(meter)
 	remote := cfg.Remote()
-	checkout := newSingleCheckout(cfg.Git, remote)
+	singleCheckout := newSingleCheckout(cfg.Git, remote)
 	cacheEnabled := cfg.StorageCacheEnabled()
 
-	pointers := newPointerMap()
-	q := newDownloadQueue(checkout.Manifest(), remote, tq.WithProgress(meter))
-	dlwatch := q.Watch()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		for t := range dlwatch {
-			for _, p := range pointers.All(t.Oid) {
-				checkout.Run(p)
-			}
-			if !cacheEnabled {
-				cleanupDownloadPath(t.Path)
-			}
-		}
-		wg.Done()
-	}()
+	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
 
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
@@ -79,7 +64,7 @@ func pull(filter *filepathfilter.Filter) {
 		// no need to download objects that exist locally already
 		lfs.LinkOrCopyFromReference(cfg, p.Oid, p.Size)
 		if cfg.LFSObjectExists(p.Oid, p.Size) {
-			checkout.Run(p)
+			singleCheckout.Run(p)
 			return
 		}
 
@@ -90,20 +75,35 @@ func pull(filter *filepathfilter.Filter) {
 	})
 
 	gitscanner.Filter = filter
-	meter.Start()
+
+	dlwatch := q.Watch()
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for t := range dlwatch {
+			for _, p := range pointers.All(t.Oid) {
+				singleCheckout.Run(p)
+			}
+			if !cacheEnabled {
+				cleanupDownloadPath(t.Path)
+			}
+		}
+		wg.Done()
+	}()
 
 	processQueue := time.Now()
 	if err := gitscanner.ScanLFSFiles(ref.Sha, nil); err != nil {
-		checkout.Close()
+		singleCheckout.Close()
 		ExitWithError(err)
 	}
 
+	meter.Start()
 	q.Wait()
 	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
 
 	meter.Finish()
-	checkout.Close()
+	singleCheckout.Close()
 
 	success := true
 	for _, err := range q.Errors() {
@@ -117,8 +117,8 @@ func pull(filter *filepathfilter.Filter) {
 		Exit(tr.Tr.Get("Failed to fetch some objects from '%s'", e.Url))
 	}
 
-	if checkout.Skip() {
-		fmt.Println(tr.Tr.Get("Skipping object checkout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
+	if singleCheckout.Skip() {
+		fmt.Println(tr.Tr.Get("Skipping object singleCheckout, Git LFS is not installed for this repository.\nConsider installing it with 'git lfs install'."))
 	}
 }
 
