@@ -77,29 +77,67 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 	}
 
 	var n int64
+	smudgeSource := mediafile
+	downloadedFromRemote := false
+	tempDownloadPath := ""
+	var cleanupTemp func()
 
 	if ptr.Size == 0 {
 		return 0, nil
 	} else if statErr != nil || stat == nil {
 		if download {
-			n, err = f.downloadFile(writer, ptr, workingfile, mediafile, manifest, cb)
+			downloadTarget := mediafile
+			if !f.cfg.StorageCacheEnabled() {
+				tempFile, tempErr := tools.TempFile(f.cfg.TempDir(), "lfs-smudge-*", f.cfg)
+				if tempErr != nil {
+					return 0, errors.New(tr.Tr.Get("could not create temporary media file: %v", tempErr))
+				}
+				tempDownloadPath = tempFile.Name()
+				if cerr := tempFile.Close(); cerr != nil {
+					os.Remove(tempDownloadPath)
+					return 0, errors.New(tr.Tr.Get("could not close temporary media file: %v", cerr))
+				}
+				downloadTarget = tempDownloadPath
+				smudgeSource = downloadTarget
+				cleanupTemp = func() {
+					if err := os.Remove(tempDownloadPath); err != nil && !os.IsNotExist(err) {
+						tracerx.Printf("git: smudge: unable to remove temp file %s: %v", tempDownloadPath, err)
+					}
+				}
+			} else {
+				smudgeSource = downloadTarget
+			}
+			n, err = f.downloadFile(writer, ptr, workingfile, downloadTarget, manifest, cb)
 
 			// In case of a cherry-pick the newly created commit is likely not yet
 			// be found in the history of a remote branch. Thus, the first attempt might fail.
 			if err != nil && f.cfg.SearchAllRemotesEnabled() {
 				tracerx.Printf("git: smudge: default remote failed. searching alternate remotes")
-				n, err = f.downloadFileFallBack(writer, ptr, workingfile, mediafile, manifest, cb)
+				n, err = f.downloadFileFallBack(writer, ptr, workingfile, downloadTarget, manifest, cb)
 			}
 
+			if err == nil && tempDownloadPath != "" {
+				downloadedFromRemote = true
+			}
 		} else {
 			return 0, errors.NewDownloadDeclinedError(statErr, tr.Tr.Get("smudge filter"))
 		}
 	} else {
+		smudgeSource = mediafile
 		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb)
 	}
 
 	if err != nil {
-		return 0, errors.NewSmudgeError(err, ptr.Oid, mediafile)
+		if cleanupTemp != nil {
+			cleanupTemp()
+			cleanupTemp = nil
+		}
+		return 0, errors.NewSmudgeError(err, ptr.Oid, smudgeSource)
+	}
+
+	if downloadedFromRemote && cleanupTemp != nil {
+		cleanupTemp()
+		cleanupTemp = nil
 	}
 
 	return n, nil
