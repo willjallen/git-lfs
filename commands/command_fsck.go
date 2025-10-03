@@ -48,6 +48,10 @@ func fsckCommand(cmd *cobra.Command, args []string) {
 	installHooks(false)
 	setupRepository()
 
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("git lfs fsck requires the local cache; re-enable it by setting lfs.storagecache=true"))
+	}
+
 	useIndex := false
 	exclude := ""
 	include := "HEAD"
