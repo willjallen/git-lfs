@@ -102,7 +102,7 @@ func TestSmudgeStreamsAndCleansTempWhenCacheDisabled(t *testing.T) {
 	require.Equal(t, 0, len(beforeTemps))
 
 	var buf bytes.Buffer
-	n, err := gf.Smudge(&buf, ptr, workingFile, true, manifest, nil)
+	n, err := gf.Smudge(&buf, ptr, workingFile, true, manifest, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, int64(len(content)), n)
 	require.Equal(t, content, buf.Bytes())

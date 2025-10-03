@@ -29,7 +29,7 @@ var (
 //
 // delayedSmudge returns the number of bytes written, whether the checkout was
 // delayed, the *lfs.Pointer that was smudged, and an error, if one occurred.
-func delayedSmudge(gf *lfs.GitFilter, s *git.FilterProcessScanner, to io.Writer, from io.Reader, q *tq.TransferQueue, filename string, skip bool, filter *filepathfilter.Filter) (int64, bool, *lfs.Pointer, error) {
+func delayedSmudge(gf *lfs.GitFilter, s *git.FilterProcessScanner, to io.Writer, from io.Reader, q *tq.TransferQueue, filename string, skip bool, filter *filepathfilter.Filter, temps *filterTempState) (int64, bool, *lfs.Pointer, error) {
 	ptr, pbuf, perr := lfs.DecodeFrom(from)
 	if perr != nil {
 		// Write 'statusFromErr(nil)', even though 'perr != nil', since
@@ -53,15 +53,34 @@ func delayedSmudge(gf *lfs.GitFilter, s *git.FilterProcessScanner, to io.Writer,
 
 	lfs.LinkOrCopyFromReference(cfg, ptr.Oid, ptr.Size)
 
-	path, err := cfg.Filesystem().ObjectPath(ptr.Oid)
-	if err != nil {
-		return 0, false, nil, err
+	useStreaming := !cfg.StorageCacheEnabled()
+	var path string
+	var err error
+	if useStreaming {
+		if !skip && filter.Allows(filename) && ptr.Size != 0 {
+			path, err = temps.Reserve(ptr, filename)
+			if err != nil {
+				return 0, false, nil, err
+			}
+		}
+	} else {
+		path, err = cfg.Filesystem().ObjectPath(ptr.Oid)
+		if err != nil {
+			return 0, false, nil, err
+		}
 	}
 
 	if !skip && filter.Allows(filename) {
-		if _, statErr := os.Stat(path); statErr != nil && ptr.Size != 0 {
-			q.Add(filename, path, ptr.Oid, ptr.Size, false, nil)
-			return 0, true, ptr, nil
+		if useStreaming {
+			if ptr.Size != 0 {
+				q.Add(filename, path, ptr.Oid, ptr.Size, false, nil)
+				return 0, true, ptr, nil
+			}
+		} else {
+			if _, statErr := os.Stat(path); statErr != nil && ptr.Size != 0 {
+				q.Add(filename, path, ptr.Oid, ptr.Size, false, nil)
+				return 0, true, ptr, nil
+			}
 		}
 
 		// Write 'statusFromErr(nil)', since the object is already
@@ -71,7 +90,22 @@ func delayedSmudge(gf *lfs.GitFilter, s *git.FilterProcessScanner, to io.Writer,
 			return 0, false, nil, err
 		}
 
-		n, err := gf.Smudge(to, ptr, filename, false, nil, nil)
+		var (
+			download bool
+			manifest tq.Manifest
+			override func() (io.ReadCloser, error)
+		)
+		if useStreaming {
+			download = true
+			manifest = getTransferManifestOperationRemote("download", cfg.Remote())
+			if len(path) > 0 {
+				override = func() (io.ReadCloser, error) {
+					return tools.RobustOpen(path)
+				}
+			}
+		}
+
+		n, err := gf.Smudge(to, ptr, filename, download, manifest, nil, override)
 		return n, false, ptr, err
 	}
 
@@ -125,7 +159,7 @@ func smudge(gf *lfs.GitFilter, to io.Writer, from io.Reader, filename string, sk
 		return int64(n), err
 	}
 
-	n, err := gf.Smudge(to, ptr, filename, true, getTransferManifestOperationRemote("download", cfg.Remote()), cb)
+	n, err := gf.Smudge(to, ptr, filename, true, getTransferManifestOperationRemote("download", cfg.Remote()), cb, nil)
 	if file != nil {
 		file.Close()
 	}

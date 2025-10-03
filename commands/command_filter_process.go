@@ -15,6 +15,7 @@ import (
 	"github.com/git-lfs/git-lfs/v3/tq"
 	"github.com/git-lfs/git-lfs/v3/tr"
 	"github.com/git-lfs/pktline"
+	"github.com/rubyist/tracerx"
 	"github.com/spf13/cobra"
 )
 
@@ -35,6 +36,100 @@ const (
 // dictating whether or not to skip the smudging process, leaving pointers as-is
 // in the working tree.
 var filterSmudgeSkip bool
+
+type filterTempState struct {
+	mu         sync.Mutex
+	tempPaths  map[string]string
+	waiters    map[string]int
+	byPath     map[string]string
+	registered map[string]bool
+}
+
+func newFilterTempState() *filterTempState {
+	return &filterTempState{
+		tempPaths:  make(map[string]string),
+		waiters:    make(map[string]int),
+		byPath:     make(map[string]string),
+		registered: make(map[string]bool),
+	}
+}
+
+func (s *filterTempState) Reserve(ptr *lfs.Pointer, name string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if path, ok := s.tempPaths[ptr.Oid]; ok {
+		s.waiters[ptr.Oid]++
+		s.byPath[name] = ptr.Oid
+		return path, nil
+	}
+
+	wrapped := &lfs.WrappedPointer{Name: name, Pointer: ptr}
+	_, path, _, _, _, err := downloadTransfer(wrapped)
+	if err != nil {
+		return "", err
+	}
+	s.tempPaths[ptr.Oid] = path
+	s.waiters[ptr.Oid] = 1
+	s.byPath[name] = ptr.Oid
+	s.registered[ptr.Oid] = false
+	return path, nil
+}
+
+func (s *filterTempState) TransferReady(oid, path string) (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(path) > 0 {
+		s.tempPaths[oid] = path
+	}
+	count := s.waiters[oid]
+	if count == 0 || s.registered[oid] {
+		return count, false
+	}
+	s.registered[oid] = true
+	return count, true
+}
+
+func (s *filterTempState) Release(name string) {
+	oid := s.forget(name)
+	if len(oid) == 0 {
+		return
+	}
+	path, remove := cfg.Filesystem().ReleaseTempObject(oid)
+	if remove && len(path) > 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			tracerx.Printf("git: filter-process: unable to remove temp object %s: %v", path, err)
+		}
+	}
+	s.done(oid)
+}
+
+func (s *filterTempState) forget(name string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	oid := s.byPath[name]
+	delete(s.byPath, name)
+	return oid
+}
+
+func (s *filterTempState) done(oid string) {
+	if len(oid) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if count, ok := s.waiters[oid]; ok {
+		count--
+		if count <= 0 {
+			delete(s.waiters, oid)
+			delete(s.tempPaths, oid)
+			delete(s.registered, oid)
+		} else {
+			s.waiters[oid] = count
+		}
+	}
+}
 
 func filterCommand(cmd *cobra.Command, args []string) {
 	requireStdin(tr.Tr.Get("This command should be run by the Git filter process"))
@@ -64,6 +159,7 @@ func filterCommand(cmd *cobra.Command, args []string) {
 	filter := filepathfilter.New(cfg.FetchIncludePaths(), cfg.FetchExcludePaths(), filepathfilter.GitIgnore)
 
 	ptrs := make(map[string]*lfs.Pointer)
+	temps := newFilterTempState()
 
 	var q *tq.TransferQueue
 	var malformed []string
@@ -117,7 +213,7 @@ func filterCommand(cmd *cobra.Command, args []string) {
 			if req.Header["can-delay"] == "1" {
 				var ptr *lfs.Pointer
 
-				n, delayed, ptr, err = delayedSmudge(gitfilter, s, w, req.Payload, q, req.Header["pathname"], skip, filter)
+				n, delayed, ptr, err = delayedSmudge(gitfilter, s, w, req.Payload, q, req.Header["pathname"], skip, filter, temps)
 
 				if delayed {
 					ptrs[req.Header["pathname"]] = ptr
@@ -131,6 +227,9 @@ func filterCommand(cmd *cobra.Command, args []string) {
 
 				n, err = smudge(gitfilter, w, from, req.Header["pathname"], skip, filter)
 				if err == nil {
+					if !cfg.StorageCacheEnabled() {
+						temps.Release(req.Header["pathname"])
+					}
 					delete(ptrs, req.Header["pathname"])
 				}
 			}
@@ -159,7 +258,15 @@ func filterCommand(cmd *cobra.Command, args []string) {
 			// until a read from that channel becomes blocking (in
 			// other words, we read until there are no more items
 			// immediately ready to be sent back to Git).
-			paths := pathnames(readAvailable(available, q.BatchSize()))
+			transfers := readAvailable(available, q.BatchSize())
+			if !cfg.StorageCacheEnabled() {
+				for _, t := range transfers {
+					if count, register := temps.TransferReady(t.Oid, t.Path); register && count > 0 {
+						cfg.Filesystem().RegisterTempObject(t.Oid, t.Path, count)
+					}
+				}
+			}
+			paths := pathnames(transfers)
 			if len(paths) == 0 {
 				// If `len(paths) == 0`, `tq.Watch()` has
 				// closed, indicating that all items have been

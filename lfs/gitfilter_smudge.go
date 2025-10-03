@@ -45,7 +45,7 @@ func (f *GitFilter) SmudgeToFile(filename string, ptr *Pointer, download bool, m
 		return errors.New(tr.Tr.Get("could not create working directory file: %v", err))
 	}
 	defer file.Close()
-	if _, err := f.Smudge(file, ptr, filename, download, manifest, cb); err != nil {
+	if _, err := f.Smudge(file, ptr, filename, download, manifest, cb, nil); err != nil {
 		if errors.IsDownloadDeclinedError(err) {
 			// write placeholder data instead
 			file.Seek(0, io.SeekStart)
@@ -58,7 +58,7 @@ func (f *GitFilter) SmudgeToFile(filename string, ptr *Pointer, download bool, m
 	return nil
 }
 
-func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, download bool, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
+func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, download bool, manifest tq.Manifest, cb tools.CopyCallback, override func() (io.ReadCloser, error)) (int64, error) {
 	mediafile, err := f.ObjectPath(ptr.Oid)
 	if err != nil {
 		return 0, err
@@ -128,7 +128,7 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 		}
 	} else {
 		smudgeSource = mediafile
-		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb)
+		n, err = f.readLocalFile(writer, ptr, mediafile, workingfile, cb, override)
 	}
 
 	if err != nil {
@@ -168,7 +168,7 @@ func (f *GitFilter) downloadFile(writer io.Writer, ptr *Pointer, workingfile, me
 		return 0, errors.Wrap(errors.Join(errs...), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
 	}
 
-	return f.readLocalFile(writer, ptr, mediafile, workingfile, nil)
+	return f.readLocalFile(writer, ptr, mediafile, workingfile, nil, nil)
 }
 
 func (f *GitFilter) downloadFileFallBack(writer io.Writer, ptr *Pointer, workingfile, mediafile string, manifest tq.Manifest, cb tools.CopyCallback) (int64, error) {
@@ -198,14 +198,22 @@ func (f *GitFilter) downloadFileFallBack(writer io.Writer, ptr *Pointer, working
 			// Set the remote persistent through all the operation as we found a valid one.
 			// This prevents multiple trial and error searches.
 			f.cfg.SetRemote(remote)
-			return f.readLocalFile(writer, ptr, mediafile, workingfile, nil)
+			return f.readLocalFile(writer, ptr, mediafile, workingfile, nil, nil)
 		}
 	}
 	return 0, errors.Wrap(errors.New(tr.Tr.Get("No known remotes")), tr.Tr.Get("Error downloading %s (%s)", workingfile, ptr.Oid))
 }
 
-func (f *GitFilter) readLocalFile(writer io.Writer, ptr *Pointer, mediafile string, workingfile string, cb tools.CopyCallback) (int64, error) {
-	reader, err := tools.RobustOpen(mediafile)
+func (f *GitFilter) readLocalFile(writer io.Writer, ptr *Pointer, mediafile string, workingfile string, cb tools.CopyCallback, override func() (io.ReadCloser, error)) (int64, error) {
+	var (
+		reader io.ReadCloser
+		err    error
+	)
+	if override != nil {
+		reader, err = override()
+	} else {
+		reader, err = tools.RobustOpen(mediafile)
+	}
 	if err != nil {
 		return 0, errors.Wrap(err, tr.Tr.Get("error opening media file"))
 	}
