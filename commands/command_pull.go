@@ -79,7 +79,13 @@ func pull(filter *filepathfilter.Filter) {
 
 	go func() {
 		for t := range dlwatch {
-			for _, p := range pointers.All(t.Oid) {
+			entries := pointers.All(t.Oid)
+			if !cfg.StorageCacheEnabled() {
+				if count := len(entries); count > 0 && len(t.Path) > 0 {
+					cfg.Filesystem().RegisterTempObject(t.Oid, t.Path, count)
+				}
+			}
+			for _, p := range entries {
 				singleCheckout.Run(p)
 			}
 		}

@@ -46,6 +46,12 @@ type Filesystem struct {
 	logdir        string
 	repoPerms     os.FileMode
 	mu            sync.Mutex
+	tempObjects   map[string]*tempObject
+}
+
+type tempObject struct {
+	path      string
+	remaining int
 }
 
 func (f *Filesystem) EachObject(fn func(Object) error) error {
@@ -73,6 +79,9 @@ func (f *Filesystem) ObjectExists(oid string, size int64) bool {
 }
 
 func (f *Filesystem) ObjectPath(oid string) (string, error) {
+	if path, ok := f.TempObjectPath(oid); ok {
+		return path, nil
+	}
 	if len(oid) < 4 {
 		return "", errors.New(tr.Tr.Get("too short object ID: %q", oid))
 	}
@@ -91,6 +100,55 @@ func (f *Filesystem) ObjectPathname(oid string) string {
 		return os.DevNull
 	}
 	return filepath.Join(f.localObjectDir(oid), oid)
+}
+
+func (f *Filesystem) TempObjectPath(oid string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tempObjects == nil {
+		return "", false
+	}
+	obj, ok := f.tempObjects[oid]
+	if !ok {
+		return "", false
+	}
+	return obj.path, true
+}
+
+func (f *Filesystem) RegisterTempObject(oid, path string, count int) {
+	if count <= 0 || len(path) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tempObjects == nil {
+		f.tempObjects = make(map[string]*tempObject)
+	}
+	f.tempObjects[oid] = &tempObject{path: path, remaining: count}
+}
+
+func (f *Filesystem) ReleaseTempObject(oid string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.tempObjects == nil {
+		return "", false
+	}
+	obj, ok := f.tempObjects[oid]
+	if !ok {
+		return "", false
+	}
+	if obj.remaining > 0 {
+		obj.remaining--
+	}
+	path := obj.path
+	if obj.remaining <= 0 {
+		delete(f.tempObjects, oid)
+		return path, true
+	}
+	return path, false
 }
 
 func (f *Filesystem) DecodePathname(path string) string {

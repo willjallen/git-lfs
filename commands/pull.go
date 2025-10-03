@@ -14,6 +14,7 @@ import (
 	"github.com/git-lfs/git-lfs/v3/subprocess"
 	"github.com/git-lfs/git-lfs/v3/tq"
 	"github.com/git-lfs/git-lfs/v3/tr"
+	"github.com/rubyist/tracerx"
 )
 
 // Handles the process of checking out a single file, and updating the git
@@ -68,6 +69,17 @@ func (c *singleCheckout) Skip() bool {
 func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 	cwdfilepath := c.pathConverter.Convert(p.Name)
 
+	if !cfg.StorageCacheEnabled() {
+		defer func() {
+			path, remove := cfg.Filesystem().ReleaseTempObject(p.Oid)
+			if remove && len(path) > 0 {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					tracerx.Printf("git: checkout: unable to remove temp object %s: %v", path, err)
+				}
+			}
+		}()
+	}
+
 	// Check the content - either missing or still this pointer (not exist is ok)
 	filepointer, err := lfs.DecodePointerFromFile(cwdfilepath)
 	if err != nil {
@@ -119,7 +131,7 @@ func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 // not perform any sort of sanity checking or add the path to the index.
 func (c *singleCheckout) RunToPath(p *lfs.WrappedPointer, path string) error {
 	gitfilter := lfs.NewGitFilter(cfg)
-	return gitfilter.SmudgeToFile(path, p.Pointer, false, c.manifest, nil)
+	return gitfilter.SmudgeToFile(path, p.Pointer, !cfg.StorageCacheEnabled(), c.manifest, nil)
 }
 
 func (c *singleCheckout) Close() {

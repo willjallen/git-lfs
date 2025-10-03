@@ -143,8 +143,26 @@ func buildFilepathFilterWithPatternType(config *config.Configuration, includeArg
 }
 
 func downloadTransfer(p *lfs.WrappedPointer) (name, path, oid string, size int64, missing bool, err error) {
-	path, err = cfg.Filesystem().ObjectPath(p.Oid)
-	return p.Name, path, p.Oid, p.Size, false, err
+	if cfg.StorageCacheEnabled() {
+		path, err = cfg.Filesystem().ObjectPath(p.Oid)
+		return p.Name, path, p.Oid, p.Size, false, err
+	}
+
+	prefix := "lfs-download-"
+	oidFragment := p.Oid
+	if len(oidFragment) > 12 {
+		oidFragment = oidFragment[:12]
+	}
+	tmp, err := tools.TempFile(cfg.TempDir(), prefix+oidFragment+"-", cfg)
+	if err != nil {
+		return "", "", "", 0, false, err
+	}
+	path = tmp.Name()
+	if cerr := tmp.Close(); cerr != nil {
+		os.Remove(path)
+		return "", "", "", 0, false, cerr
+	}
+	return p.Name, path, p.Oid, p.Size, false, nil
 }
 
 // Get user-readable manual install steps for hooks
