@@ -316,7 +316,7 @@ func (c *uploadContext) ReportErrors() {
 		}
 	}
 
-	if !cfg.StorageCacheEnabled() || c.DryRun || len(c.otherErrs) > 0 || len(c.missing) > 0 || len(c.corrupt) > 0 || !cfg.HasExplicitKnownGoodRemotes() {
+	if cfg.StorageCacheEnabled() || c.DryRun || len(c.otherErrs) > 0 || len(c.missing) > 0 || len(c.corrupt) > 0 || !cfg.HasExplicitKnownGoodRemotes() {
 		return
 	}
 
