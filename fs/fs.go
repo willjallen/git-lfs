@@ -126,6 +126,11 @@ func (f *Filesystem) RegisterTempObject(oid, path string, count int) {
 	if f.tempObjects == nil {
 		f.tempObjects = make(map[string]*tempObject)
 	}
+	if existing, ok := f.tempObjects[oid]; ok {
+		// Another consumer is sharing the same temp artifact; bump its refcount.
+		existing.remaining += count
+		return
+	}
 	f.tempObjects[oid] = &tempObject{path: path, remaining: count}
 }
 

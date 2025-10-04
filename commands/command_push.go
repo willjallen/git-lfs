@@ -100,6 +100,10 @@ func uploadsBetweenRefAndRemote(ctx *uploadContext, refnames []string) {
 }
 
 func uploadsWithObjectIDs(ctx *uploadContext, oids []string) {
+	if !cfg.StorageCacheEnabled() {
+		Exit(tr.Tr.Get("git lfs push --object-id requires the local cache; re-enable it by setting lfs.storagecache=true"))
+	}
+
 	pointers := make([]*lfs.WrappedPointer, len(oids))
 	for i, oid := range oids {
 		mp, err := ctx.gitfilter.ObjectPath(oid)

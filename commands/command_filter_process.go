@@ -222,16 +222,18 @@ func filterCommand(cmd *cobra.Command, args []string) {
 				s.WriteStatus(statusFromErr(nil))
 				from, ferr := incomingOrCached(req.Payload, ptrs[req.Header["pathname"]])
 				if ferr != nil {
-					break
-				}
-
-				n, err = smudge(gitfilter, w, from, req.Header["pathname"], skip, filter)
-				if err == nil {
 					if !cfg.StorageCacheEnabled() {
 						temps.Release(req.Header["pathname"])
 					}
 					delete(ptrs, req.Header["pathname"])
+					break
 				}
+
+				n, err = smudge(gitfilter, w, from, req.Header["pathname"], skip, filter)
+				if !cfg.StorageCacheEnabled() {
+					temps.Release(req.Header["pathname"])
+				}
+				delete(ptrs, req.Header["pathname"])
 			}
 		case "list_available_blobs":
 			closeOnce.Do(func() {
@@ -346,6 +348,12 @@ func filterCommand(cmd *cobra.Command, args []string) {
 		}
 
 		fmt.Fprint(os.Stderr, "\n", tr.Tr.Get("See: `git lfs help smudge` for more details."), "\n")
+	}
+
+	if !cfg.StorageCacheEnabled() {
+		for name := range ptrs {
+			temps.Release(name)
+		}
 	}
 
 	if err := s.Err(); err != nil && err != io.EOF {

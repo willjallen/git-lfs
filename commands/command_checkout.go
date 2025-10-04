@@ -3,6 +3,7 @@ package commands
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/git-lfs/git-lfs/v3/errors"
 	"github.com/git-lfs/git-lfs/v3/filepathfilter"
@@ -44,7 +45,8 @@ func checkoutCommand(cmd *cobra.Command, args []string) {
 		Panic(err, tr.Tr.Get("Could not checkout"))
 	}
 
-	singleCheckout := newSingleCheckout(cfg.Git, "")
+	remote := cfg.Remote()
+	singleCheckout := newSingleCheckout(cfg.Git, remote)
 	if singleCheckout.Skip() {
 		fmt.Println(tr.Tr.Get("Cannot checkout LFS objects, Git LFS is not installed."))
 		return
@@ -75,6 +77,54 @@ func checkoutCommand(cmd *cobra.Command, args []string) {
 
 	if err := chgitscanner.ScanLFSFiles(ref.Sha, nil); err != nil {
 		ExitWithError(err)
+	}
+
+	if !cfg.StorageCacheEnabled() && len(pointers) > 0 {
+		counts := make(map[string]int, len(pointers))
+		seen := make(map[string]struct{}, len(pointers))
+		unique := make([]*lfs.WrappedPointer, 0, len(pointers))
+
+		for _, p := range pointers {
+			counts[p.Oid]++
+			if _, ok := seen[p.Oid]; !ok {
+				seen[p.Oid] = struct{}{}
+				unique = append(unique, p)
+			}
+		}
+
+		if len(unique) > 0 {
+			queue := newDownloadQueue(singleCheckout.Manifest(), remote)
+			dlwatch := queue.Watch()
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for t := range dlwatch {
+					if count := counts[t.Oid]; count > 0 && len(t.Path) > 0 {
+						cfg.Filesystem().RegisterTempObject(t.Oid, t.Path, count)
+					}
+				}
+			}()
+
+			for _, p := range unique {
+				queue.Add(downloadTransfer(p))
+			}
+
+			queue.Wait()
+			wg.Wait()
+
+			success := true
+			for _, err := range queue.Errors() {
+				success = false
+				FullError(err)
+			}
+
+			if !success {
+				c := getAPIClient()
+				e := c.Endpoints.Endpoint("download", remote)
+				Exit(tr.Tr.Get("Failed to fetch some objects from '%s'", e.Url))
+			}
+		}
 	}
 
 	meter.Start()
