@@ -93,6 +93,8 @@ func checkoutCommand(cmd *cobra.Command, args []string) {
 		}
 
 		if len(unique) > 0 {
+			tempDownloads := make(map[string]string)
+			var tempMu sync.Mutex
 			queue := newDownloadQueue(singleCheckout.Manifest(), remote)
 			dlwatch := queue.Watch()
 			var wg sync.WaitGroup
@@ -100,6 +102,9 @@ func checkoutCommand(cmd *cobra.Command, args []string) {
 			go func() {
 				defer wg.Done()
 				for t := range dlwatch {
+					tempMu.Lock()
+					delete(tempDownloads, t.Oid)
+					tempMu.Unlock()
 					if count := counts[t.Oid]; count > 0 && len(t.Path) > 0 {
 						cfg.Filesystem().RegisterTempObject(t.Oid, t.Path, count)
 					}
@@ -107,11 +112,27 @@ func checkoutCommand(cmd *cobra.Command, args []string) {
 			}()
 
 			for _, p := range unique {
-				queue.Add(downloadTransfer(p))
+				name, path, oid, size, missing, derr := downloadTransfer(p)
+				if derr == nil && len(path) > 0 {
+					tempMu.Lock()
+					tempDownloads[oid] = path
+					tempMu.Unlock()
+				}
+				queue.Add(name, path, oid, size, missing, derr)
 			}
 
 			queue.Wait()
 			wg.Wait()
+			tempMu.Lock()
+			remaining := make([]string, 0, len(tempDownloads))
+			for oid := range tempDownloads {
+				remaining = append(remaining, oid)
+			}
+			tempDownloads = make(map[string]string)
+			tempMu.Unlock()
+			for _, oid := range remaining {
+				cfg.Filesystem().DiscardTempObject(oid)
+			}
 
 			success := true
 			for _, err := range queue.Errors() {

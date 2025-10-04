@@ -48,6 +48,8 @@ func pull(filter *filepathfilter.Filter) {
 	remote := cfg.Remote()
 	singleCheckout := newSingleCheckout(cfg.Git, remote)
 	q := newDownloadQueue(singleCheckout.Manifest(), remote, tq.WithProgress(meter))
+	tempDownloads := make(map[string]string)
+	var tempMu sync.Mutex
 	gitscanner := lfs.NewGitScanner(cfg, func(p *lfs.WrappedPointer, err error) {
 		if err != nil {
 			LoggedError(err, tr.Tr.Get("Scanner error: %s", err))
@@ -68,7 +70,13 @@ func pull(filter *filepathfilter.Filter) {
 		meter.Add(p.Size)
 		tracerx.Printf("fetch %v [%v]", p.Name, p.Oid)
 		pointers.Add(p)
-		q.Add(downloadTransfer(p))
+		name, path, oid, size, missing, derr := downloadTransfer(p)
+		if derr == nil && len(path) > 0 {
+			tempMu.Lock()
+			tempDownloads[oid] = path
+			tempMu.Unlock()
+		}
+		q.Add(name, path, oid, size, missing, derr)
 	})
 
 	gitscanner.Filter = filter
@@ -79,6 +87,9 @@ func pull(filter *filepathfilter.Filter) {
 
 	go func() {
 		for t := range dlwatch {
+			tempMu.Lock()
+			delete(tempDownloads, t.Oid)
+			tempMu.Unlock()
 			entries := pointers.All(t.Oid)
 			if !cfg.StorageCacheEnabled() {
 				if count := len(entries); count > 0 && len(t.Path) > 0 {
@@ -102,6 +113,16 @@ func pull(filter *filepathfilter.Filter) {
 	q.Wait()
 	wg.Wait()
 	tracerx.PerformanceSince("process queue", processQueue)
+	tempMu.Lock()
+	remaining := make([]string, 0, len(tempDownloads))
+	for oid := range tempDownloads {
+		remaining = append(remaining, oid)
+	}
+	tempDownloads = make(map[string]string)
+	tempMu.Unlock()
+	for _, oid := range remaining {
+		cfg.Filesystem().DiscardTempObject(oid)
+	}
 
 	singleCheckout.Close()
 

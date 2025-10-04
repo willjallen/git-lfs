@@ -38,15 +38,16 @@ type Object struct {
 }
 
 type Filesystem struct {
-	GitStorageDir string   // parent of objects/lfs (may be same as GitDir but may not)
-	LFSStorageDir string   // parent of lfs objects and tmp dirs. Default: ".git/lfs"
-	ReferenceDirs []string // alternative local media dirs (relative to clone reference repo)
-	lfsobjdir     string
-	tmpdir        string
-	logdir        string
-	repoPerms     os.FileMode
-	mu            sync.Mutex
-	tempObjects   map[string]*tempObject
+	GitStorageDir      string   // parent of objects/lfs (may be same as GitDir but may not)
+	LFSStorageDir      string   // parent of lfs objects and tmp dirs. Default: ".git/lfs"
+	ReferenceDirs      []string // alternative local media dirs (relative to clone reference repo)
+	lfsobjdir          string
+	tmpdir             string
+	logdir             string
+	repoPerms          os.FileMode
+	mu                 sync.Mutex
+	tempObjects        map[string]*tempObject
+	pendingTempObjects map[string]string
 }
 
 type tempObject struct {
@@ -122,6 +123,9 @@ func (f *Filesystem) RegisterTempObject(oid, path string, count int) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.pendingTempObjects != nil {
+		delete(f.pendingTempObjects, oid)
+	}
 
 	if f.tempObjects == nil {
 		f.tempObjects = make(map[string]*tempObject)
@@ -154,6 +158,39 @@ func (f *Filesystem) ReleaseTempObject(oid string) (string, bool) {
 		return path, true
 	}
 	return path, false
+}
+
+func (f *Filesystem) TrackTempObject(oid, path string) {
+	if len(oid) == 0 || len(path) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.pendingTempObjects == nil {
+		f.pendingTempObjects = make(map[string]string)
+	}
+	f.pendingTempObjects[oid] = path
+}
+
+func (f *Filesystem) DiscardTempObject(oid string) {
+	if len(oid) == 0 {
+		return
+	}
+	var path string
+	f.mu.Lock()
+	if f.pendingTempObjects != nil {
+		if p, ok := f.pendingTempObjects[oid]; ok {
+			path = p
+			delete(f.pendingTempObjects, oid)
+		}
+	}
+	f.mu.Unlock()
+	if len(path) == 0 {
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		tracerx.Printf("fs: unable to remove temp object %s: %v", path, err)
+	}
 }
 
 func (f *Filesystem) DecodePathname(path string) string {

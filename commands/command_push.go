@@ -48,6 +48,14 @@ func pushCommand(cmd *cobra.Command, args []string) {
 
 	ctx := newUploadContext(pushDryRun)
 
+	// Warn when streaming mode pruned the cache and we are pushing to a non known-good remote.
+	if !cfg.StorageCacheEnabled() && cfg.HasExplicitKnownGoodRemotes() {
+		known := cfg.KnownGoodRemotes()
+		if len(known) == 1 && !cfg.IsKnownGoodRemote(ctx.Remote) {
+			Error(tr.Tr.Get("warning: cache-disabled pushes only retain objects for known-good remote %s; pushing to %s may require re-enabling lfs.storagecache", known[0], ctx.Remote))
+		}
+	}
+
 	var argList []string
 	if useStdin {
 		if len(args) > 1 {

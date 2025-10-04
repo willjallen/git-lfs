@@ -162,6 +162,7 @@ func downloadTransfer(p *lfs.WrappedPointer) (name, path, oid string, size int64
 		os.Remove(path)
 		return "", "", "", 0, false, cerr
 	}
+	cfg.Filesystem().TrackTempObject(p.Oid, path)
 	return p.Name, path, p.Oid, p.Size, false, nil
 }
 
