@@ -48,6 +48,7 @@ type Filesystem struct {
 	mu                 sync.Mutex
 	tempObjects        map[string]*tempObject
 	pendingTempObjects map[string]string
+	remoteDownloads    map[string]struct{}
 }
 
 type tempObject struct {
@@ -207,6 +208,72 @@ func (f *Filesystem) DiscardTempObject(oid string) {
 
 func (f *Filesystem) DecodePathname(path string) string {
 	return string(DecodePathBytes([]byte(path)))
+}
+
+func (f *Filesystem) markRemoteDownload(oid string) {
+	if len(oid) == 0 {
+		return
+	}
+	if f.remoteDownloads == nil {
+		f.remoteDownloads = make(map[string]struct{})
+	}
+	f.remoteDownloads[oid] = struct{}{}
+}
+
+// MarkRemoteDownload records that the given OID was downloaded from a remote
+// source during streaming operations.
+func (f *Filesystem) MarkRemoteDownload(oid string) {
+	if len(oid) == 0 {
+		return
+	}
+	dir := f.remoteMarkerDir()
+	f.mu.Lock()
+	f.markRemoteDownload(oid)
+	f.mu.Unlock()
+	if len(dir) > 0 {
+		path := filepath.Join(dir, oid)
+		if err := os.WriteFile(path, nil, f.repoPerms); err != nil && !errors.Is(err, os.ErrExist) {
+			tracerx.Printf("fs: unable to mark remote download %s: %v", oid, err)
+		}
+	}
+}
+
+// IsRemoteDownload returns true if the given OID was previously downloaded
+// from a remote while streaming.
+func (f *Filesystem) IsRemoteDownload(oid string) bool {
+	if len(oid) == 0 {
+		return false
+	}
+	f.mu.Lock()
+	if f.remoteDownloads != nil {
+		if _, ok := f.remoteDownloads[oid]; ok {
+			f.mu.Unlock()
+			return true
+		}
+	}
+	f.mu.Unlock()
+
+	dir := f.remoteMarkerDir()
+	if len(dir) == 0 {
+		return false
+	}
+	path := filepath.Join(dir, oid)
+	if _, err := os.Stat(path); err == nil {
+		f.mu.Lock()
+		f.markRemoteDownload(oid)
+		f.mu.Unlock()
+		return true
+	}
+	return false
+}
+
+func (f *Filesystem) remoteMarkerDir() string {
+	dir := filepath.Join(f.TempDir(), "remote")
+	if err := tools.MkdirAll(dir, f); err != nil {
+		tracerx.Printf("fs: unable to create remote marker dir %s: %v", dir, err)
+		return ""
+	}
+	return dir
 }
 
 func (f *Filesystem) RepositoryPermissions(executable bool) os.FileMode {

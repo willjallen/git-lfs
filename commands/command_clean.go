@@ -73,17 +73,21 @@ func clean(gf *lfs.GitFilter, to io.Writer, from io.Reader, fileName string, fil
 		Panic(err, tr.Tr.Get("Unable to get local media path."))
 	}
 
-	if stat, _ := os.Stat(mediafile); stat != nil {
-		if stat.Size() != cleaned.Size && len(cleaned.Pointer.Extensions) == 0 {
-			Exit("%s\n%s\n%s", tr.Tr.Get("Files don't match:"), mediafile, tmpfile)
-		}
-		tracerx.Printf("%s exists", mediafile)
-	} else {
-		if err := os.Rename(tmpfile, mediafile); err != nil {
-			Panic(err, tr.Tr.Get("Unable to move %s to %s", tmpfile, mediafile))
-		}
+	skipCache := !cfg.StorageCacheEnabled() && cfg.Filesystem().IsRemoteDownload(cleaned.Oid)
 
-		tracerx.Printf("Writing %s", mediafile)
+	if !skipCache {
+		if stat, _ := os.Stat(mediafile); stat != nil {
+			if stat.Size() != cleaned.Size && len(cleaned.Pointer.Extensions) == 0 {
+				Exit("%s\n%s\n%s", tr.Tr.Get("Files don't match:"), mediafile, tmpfile)
+			}
+			tracerx.Printf("%s exists", mediafile)
+		} else {
+			if err := os.Rename(tmpfile, mediafile); err != nil {
+				Panic(err, tr.Tr.Get("Unable to move %s to %s", tmpfile, mediafile))
+			}
+
+			tracerx.Printf("Writing %s", mediafile)
+		}
 	}
 
 	_, err = lfs.EncodePointer(to, cleaned.Pointer)

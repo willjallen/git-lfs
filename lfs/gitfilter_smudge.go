@@ -145,6 +145,10 @@ func (f *GitFilter) Smudge(writer io.Writer, ptr *Pointer, workingfile string, d
 		return 0, errors.NewSmudgeError(err, ptr.Oid, smudgeSource)
 	}
 
+	if downloadedFromRemote {
+		f.cfg.Filesystem().MarkRemoteDownload(ptr.Oid)
+	}
+
 	// Only remove the temp artifact if we downloaded from a remote.
 	if downloadedFromRemote && cleanupTemp != nil {
 		cleanupTemp()

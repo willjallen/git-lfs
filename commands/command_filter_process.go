@@ -102,6 +102,9 @@ func (s *filterTempState) Release(name string) {
 		return
 	}
 	path, remove := cfg.Filesystem().ReleaseTempObject(oid)
+	if remove {
+		cfg.Filesystem().MarkRemoteDownload(oid)
+	}
 	if remove && len(path) > 0 {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			tracerx.Printf("git: filter-process: unable to remove temp object %s: %v", path, err)

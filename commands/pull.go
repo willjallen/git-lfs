@@ -96,6 +96,9 @@ func (c *singleCheckout) Run(p *lfs.WrappedPointer) {
 		// completes; delete the file on the last consumer.
 		defer func() {
 			path, remove := cfg.Filesystem().ReleaseTempObject(p.Oid)
+			if remove {
+				cfg.Filesystem().MarkRemoteDownload(p.Oid)
+			}
 			if remove && len(path) > 0 {
 				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 					tracerx.Printf("git: checkout: unable to remove temp object %s: %v", path, err)
