@@ -327,6 +327,7 @@ func (c *uploadContext) ReportErrors() {
 		return
 	}
 
+	fs := cfg.Filesystem()
 	for oid := range c.uploadedOids.Iter() {
 		localMediaPath, err := c.gitfilter.ObjectPath(oid)
 		if err != nil {
@@ -334,9 +335,18 @@ func (c *uploadContext) ReportErrors() {
 			continue
 		}
 
-		// Best-effort removal; log and continue on failure.
-		if err := os.Remove(localMediaPath); err != nil && !os.IsNotExist(err) {
+		removed := false
+		switch err := os.Remove(localMediaPath); {
+		case err == nil:
+			removed = true
+		case os.IsNotExist(err):
+			removed = true
+		default:
 			tracerx.Printf("commands: prune: unable to remove cached object %s: %v", localMediaPath, err)
+		}
+
+		if removed {
+			fs.MarkRemoteDownload(oid)
 		}
 	}
 }
